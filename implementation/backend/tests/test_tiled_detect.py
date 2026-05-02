@@ -8,7 +8,7 @@ degradation. Tests stub the VLM directly — real Ollama is never contacted.
 
 from __future__ import annotations
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from app.pipeline.base import PipelineContext
 from app.pipeline.detect_tiled import (
@@ -98,7 +98,32 @@ class _StubVLM:
 
 
 def _raster_source(width: int = 4000, height: int = 3000) -> DrawingSource:
-    """Raster source — DPI is structurally unused for these tests."""
+    """Raster source with enough line content to clear the empty-tile skip.
+
+    The empty-tile pre-filter (Canny edge density < 0.005) was added to keep
+    blank tiles from invoking the VLM. Tests that want the stub VLM to
+    actually be called need crops with non-trivial edge density — we draw a
+    grid of lines spaced 60 px apart, dense enough that any tile of the
+    default tile sizes carries hundreds of edge pixels.
+    """
+    probe = Image.new("RGB", (width, height), color="white")
+    draw = ImageDraw.Draw(probe)
+    spacing = 60
+    for x in range(0, width, spacing):
+        draw.line([(x, 0), (x, height)], fill="black", width=2)
+    for y in range(0, height, spacing):
+        draw.line([(0, y), (width, y)], fill="black", width=2)
+    return DrawingSource(
+        kind="raster_image",
+        pdf_doc=None,
+        page=None,
+        page_size_pt=None,
+        raster_probe=probe,
+    )
+
+
+def _empty_raster_source(width: int = 4000, height: int = 3000) -> DrawingSource:
+    """Pure-white raster source — used to exercise the empty-tile skip."""
     probe = Image.new("RGB", (width, height), color="white")
     return DrawingSource(
         kind="raster_image",
@@ -364,3 +389,42 @@ def test_stage_failure_is_degradation() -> None:
 
     assert ctx.segments_draft == []
     assert any(e.startswith("tiled_detect:") for e in ctx.errors)
+
+
+# ── Empty-tile pre-filter (PR-A) ─────────────────────────────────────────────
+
+
+def test_empty_tile_skipped_without_vlm_call() -> None:
+    """Pure-white plan_view tiles produce zero segments AND zero VLM calls.
+
+    The empty-tile skip reads Canny edge density before invoking detect_tile.
+    Tiles below the 0.005 threshold are background — calling the model on them
+    invites the column-marker hallucination from drawing 01. The skip prevents
+    both the bad output and the wasted inference call.
+    """
+    src = _empty_raster_source(width=4000, height=3000)
+    layout = PageLayout(plan_view=(0.0, 0.0, 3000.0, 2000.0))
+    ctx = _ctx_with(src, layout)
+    vlm = _StubVLM()
+
+    TiledDuctDetectionStage(vlm).run(ctx)
+
+    assert vlm.call_count == 0
+    assert ctx.segments_draft == []
+
+
+def test_empty_tile_skip_logs_edge_density(caplog) -> None:  # type: ignore[no-untyped-def]
+    """Skipped tiles emit an INFO log line citing the edge_density value."""
+    import logging
+
+    src = _empty_raster_source(width=2000, height=2000)
+    layout = PageLayout(plan_view=(0.0, 0.0, 1500.0, 1500.0))
+    ctx = _ctx_with(src, layout)
+    vlm = _StubVLM()
+
+    with caplog.at_level(logging.INFO, logger="app.pipeline.detect_tiled"):
+        TiledDuctDetectionStage(vlm).run(ctx)
+
+    skip_records = [r for r in caplog.records if "skipping empty tile" in r.message]
+    assert skip_records, "expected at least one empty-tile skip log line"
+    assert "edge_density" in skip_records[0].message

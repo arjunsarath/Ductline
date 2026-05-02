@@ -8,6 +8,7 @@ raster the frontend can render directly.
 from __future__ import annotations
 
 import base64
+import logging
 from collections import Counter
 from io import BytesIO
 
@@ -23,6 +24,8 @@ from app.schemas import (
     Segment,
 )
 
+logger = logging.getLogger(__name__)
+
 # 200 DPI rasters are huge; the display copy is capped so the JSON payload
 # stays reasonable. Detection coords stay in the original-resolution space.
 _DISPLAY_MAX_LONG_EDGE_PX = 2000
@@ -33,6 +36,18 @@ def assemble_result(ctx: PipelineContext) -> DrawingResult:
 
     segments = [_build_segment(ctx, draft) for draft in ctx.segments_draft]
     coord_space = "pdf_points" if ctx.source.kind == "vector_pdf" else "pixels"
+    aggregate = _aggregate(segments)
+    logger.info(
+        "assemble: drawing_id=%s segments=%d by_pc=%s by_conf=%s coord_space=%s "
+        "errors=%d quality=%s",
+        ctx.drawing_id,
+        aggregate.total,
+        dict(aggregate.by_pressure_class),
+        dict(aggregate.by_confidence),
+        coord_space,
+        len(ctx.errors),
+        ctx.quality.overall if ctx.quality else "missing",
+    )
     return DrawingResult(
         drawing_id=ctx.drawing_id,
         width_px=ctx.width_px,
@@ -40,7 +55,7 @@ def assemble_result(ctx: PipelineContext) -> DrawingResult:
         display_image_data_url=_to_display_data_url(ctx.source.raster_probe),
         quality=ctx.quality or _empty_quality(),
         segments=segments,
-        aggregate=_aggregate(segments),
+        aggregate=aggregate,
         coord_space=coord_space,
         page_size_pt=ctx.source.page_size_pt,
         errors=ctx.errors,

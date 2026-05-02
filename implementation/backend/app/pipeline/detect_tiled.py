@@ -60,6 +60,10 @@ from __future__ import annotations
 import logging
 import math
 
+import cv2
+import numpy as np
+from PIL.Image import Image as PILImage
+
 from app.config import settings
 from app.pipeline.base import PipelineContext, PipelineStage, VLMSegmentDraft
 from app.schemas import Geometry, ReasoningStep
@@ -82,6 +86,14 @@ _VECTOR_FALLBACK_DPI = 200
 # 72 points per inch — the PDF point system. Multiplying ``tile_px / dpi``
 # converts a pixel target to a point-space rect side length.
 _PT_PER_INCH = 72
+
+# Empty-tile skip: tiles whose Canny edge density is below this threshold are
+# almost entirely background (white space, page margins, or sparse column
+# markers). Calling the VLM on them invites hallucination — the model will
+# fabricate ducts from the few stray lines it can see — and wastes a slow
+# inference call. 0.005 = 0.5% of pixels are edges. Real plan-view content
+# sits at 5-15%; column-marker-only strips sit below 0.5%.
+_EMPTY_TILE_EDGE_DENSITY_THRESHOLD = 0.005
 
 
 class TiledDuctDetectionStage(PipelineStage):
@@ -200,6 +212,19 @@ class TiledDuctDetectionStage(PipelineStage):
             )
             return []
 
+        # Empty-tile skip: tiles covering page margins / column-header strips
+        # are mostly white. Calling the VLM on them invites hallucination
+        # (the model fabricates ducts from a handful of column-marker lines)
+        # and burns ~10s per call. Skip without invoking the model.
+        edge_density = _tile_edge_density(crop)
+        if edge_density < _EMPTY_TILE_EDGE_DENSITY_THRESHOLD:
+            logger.info(
+                "tiled_detect: skipping empty tile (%d,%d) edge_density=%.4f rect=%s",
+                row, col, edge_density,
+                tuple(round(v, 1) for v in tile_rect),
+            )
+            return []
+
         try:
             response = self._vlm.detect_tile(
                 crop,
@@ -216,9 +241,14 @@ class TiledDuctDetectionStage(PipelineStage):
             )
             return []
 
-        return _project_segments_to_source(
+        stitched = _project_segments_to_source(
             response.segments, tile_rect, row, col
         )
+        logger.info(
+            "tiled_detect: tile (%d,%d) → %d segments after stitching",
+            row, col, len(stitched),
+        )
+        return stitched
 
 
 # ── Tile geometry ────────────────────────────────────────────────────────────
@@ -283,6 +313,22 @@ def _compute_tiles(
                 continue
             tiles.append(((tx0, ty0, tx1, ty1), row, col, total_rows, total_cols))
     return tiles
+
+
+def _tile_edge_density(crop: PILImage) -> float:
+    """Fraction of pixels in ``crop`` that are Canny edges.
+
+    Used as an empty-tile pre-filter before the VLM call. Tiles covering
+    page margins / column-header strips have edge density well below 0.5%;
+    real plan-view content sits at 5-15%. The threshold lives in
+    ``_EMPTY_TILE_EDGE_DENSITY_THRESHOLD``. Pure helper (no side effects)
+    so unit tests can hit it directly.
+    """
+    arr = np.asarray(crop.convert("L"))
+    if arr.size == 0:
+        return 0.0
+    edges = cv2.Canny(arr, threshold1=50, threshold2=150)
+    return float(np.count_nonzero(edges)) / float(edges.size)
 
 
 def _resolve_per_tile_dpi(

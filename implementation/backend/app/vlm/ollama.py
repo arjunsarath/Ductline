@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import time
 from io import BytesIO
 from pathlib import Path
+from statistics import mean, pstdev
 from typing import TYPE_CHECKING
 
 import httpx
@@ -36,6 +39,8 @@ from app.vlm.tools import (
 if TYPE_CHECKING:
     from app.pipeline.base import VLMSegmentDraft
     from app.pipeline.legend import Legend
+
+logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _VLM_LONG_EDGE_PX = 1568  # llama3.2-vision native input edge
@@ -69,8 +74,22 @@ class OllamaVisionClient(VLMClient):
             "options": {"temperature": 0.0},
         }
 
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect: start prompt=%s image=%dx%d",
+            prompt_version,
+            downscaled.width,
+            downscaled.height,
+        )
         raw_response = self._post("/api/generate", payload).get("response", "")
         tool = _parse_tool_call(raw_response)
+        logger.info(
+            "vlm.detect: done prompt=%s segments=%d response_len=%d elapsed=%.2fs",
+            prompt_version,
+            len(tool.segments),
+            len(raw_response),
+            time.monotonic() - t0,
+        )
 
         # The model saw a downscaled image but we want coords in the original
         # space. Bbox values are normalized [0, 1] so the conversion is trivial:
@@ -112,8 +131,24 @@ class OllamaVisionClient(VLMClient):
             "stream": False,
             "options": {"temperature": 0.0},
         }
+        row, col, total_rows, total_cols = tile_position
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_tile: start tile=(%d,%d)/(%d,%d) crop=%dx%d trail=%d legend=%s",
+            row, col, total_rows, total_cols,
+            crop.width, crop.height,
+            len(trail_context),
+            "yes" if legend is not None else "no",
+        )
         raw_response = self._post("/api/generate", payload).get("response", "")
         tool = _parse_tool_call(raw_response)
+        logger.info(
+            "vlm.detect_tile: done tile=(%d,%d) segments=%d sample_bboxes=%s elapsed=%.2fs",
+            row, col,
+            len(tool.segments),
+            _format_bbox_sample(tool.segments),
+            time.monotonic() - t0,
+        )
         return DetectionResult(prompt_version="v3_tiled", segments=tool.segments)
 
     def categorize_region(self, crop: Image) -> CategorizePageTool:
@@ -132,6 +167,7 @@ class OllamaVisionClient(VLMClient):
             "stream": False,
             "options": {"temperature": 0.0},
         }
+        t0 = time.monotonic()
         raw = self._post("/api/generate", payload).get("response", "")
         if not raw:
             raise VLMError("empty response from VLM categorize_region")
@@ -140,11 +176,19 @@ class OllamaVisionClient(VLMClient):
         except json.JSONDecodeError as exc:
             raise VLMError(f"VLM categorize JSON invalid: {exc}") from exc
         try:
-            return CategorizePageTool.model_validate(data)
+            tool = CategorizePageTool.model_validate(data)
         except ValidationError as exc:
             raise VLMError(
                 f"VLM categorize JSON failed schema: {exc.error_count()} errors"
             ) from exc
+        logger.info(
+            "vlm.categorize_region: kind=%s crop=%dx%d elapsed=%.2fs",
+            tool.region_kind,
+            crop.width,
+            crop.height,
+            time.monotonic() - t0,
+        )
+        return tool
 
     def review_segment(
         self,
@@ -170,6 +214,7 @@ class OllamaVisionClient(VLMClient):
             "stream": False,
             "options": {"temperature": 0.0},
         }
+        t0 = time.monotonic()
         raw = self._post("/api/generate", payload).get("response", "")
         if not raw:
             raise VLMError("empty response from VLM review_segment")
@@ -178,11 +223,19 @@ class OllamaVisionClient(VLMClient):
         except json.JSONDecodeError as exc:
             raise VLMError(f"VLM review JSON invalid: {exc}") from exc
         try:
-            return ReviewSegmentTool.model_validate(data)
+            verdict = ReviewSegmentTool.model_validate(data)
         except ValidationError as exc:
             raise VLMError(
                 f"VLM review JSON failed schema: {exc.error_count()} errors"
             ) from exc
+        logger.info(
+            "vlm.review_segment: id=%s verdict=%s reason=%r elapsed=%.2fs",
+            segment.segment_id,
+            verdict.verdict,
+            verdict.reason[:80],
+            time.monotonic() - t0,
+        )
+        return verdict
 
     def refine_segment(
         self,
@@ -207,6 +260,7 @@ class OllamaVisionClient(VLMClient):
             "stream": False,
             "options": {"temperature": 0.0},
         }
+        t0 = time.monotonic()
         raw = self._post("/api/generate", payload).get("response", "")
         if not raw:
             raise VLMError("empty response from VLM refine_segment")
@@ -215,11 +269,20 @@ class OllamaVisionClient(VLMClient):
         except json.JSONDecodeError as exc:
             raise VLMError(f"VLM refine JSON invalid: {exc}") from exc
         try:
-            return RefineSegmentTool.model_validate(data)
+            refined = RefineSegmentTool.model_validate(data)
         except ValidationError as exc:
             raise VLMError(
                 f"VLM refine JSON failed schema: {exc.error_count()} errors"
             ) from exc
+        logger.info(
+            "vlm.refine_segment: id=%s bbox=%s shape=%s note=%r elapsed=%.2fs",
+            previous.segment_id,
+            tuple(round(v, 3) for v in refined.bbox_normalized),
+            refined.shape_hint,
+            refined.note[:60],
+            time.monotonic() - t0,
+        )
+        return refined
 
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self._host_url}{path}"
@@ -433,14 +496,28 @@ def _parse_tool_call(raw: str) -> DetectDuctsTool:
 
 
 # Smaller vision models (notably llama3.2-vision 11B) often hallucinate
-# bbox responses with three tells: duplicate bboxes, coords confined to a
-# tenth-grid like 0.1 / 0.2 / 0.3 …, or absurdly long lists. Detecting these
-# lets stage 4 fall back to filtered CV detection instead of feeding the
-# pipeline garbage.
-_GRID_VALUES = {round(i * 0.1, 1) for i in range(11)}
+# bbox responses with four tells: duplicate bboxes, coords confined to a
+# tenth-grid like 0.1 / 0.2 / 0.3 …, absurdly long lists, or suspiciously
+# uniform bbox dimensions (the column-marker / grid-line failure mode that
+# manifests on tile crops covering page header / footer strips). Detecting
+# these lets stage 4 / stage 5 fall back to "skip this tile" instead of
+# feeding the pipeline garbage.
+# Tenth-grid check: a coordinate is "on the tenth grid" when it is essentially
+# a multiple of 0.1 (e.g. 0.0, 0.1, 0.2 …). The original implementation used
+# ``round(c, 1) in _GRID_VALUES`` which is True for ANY value in [0, 1] —
+# every float rounds to some tenth — so the heuristic was effectively a
+# no-op against real-valued model output. Fixed: a value is clean-tenth iff
+# its distance to its nearest tenth is below ``_TENTH_GRID_TOLERANCE``.
+_TENTH_GRID_TOLERANCE = 0.001
 _HALLUCINATED_DUPLICATE_THRESHOLD = 0.5  # ≥50% duplicates → reject
 _HALLUCINATED_GRID_THRESHOLD = 0.9       # ≥90% on the tenth grid → reject
 _HALLUCINATED_COUNT_LIMIT = 80           # > this many segments is implausible
+# Uniform-pattern check: if ≥4 segments AND the coefficient of variation
+# (stddev/mean) of both width and height is below this, the model is almost
+# certainly emitting one box per repeating geometric element rather than
+# detecting real ducts.
+_HALLUCINATED_UNIFORM_CV_THRESHOLD = 0.10
+_HALLUCINATED_UNIFORM_MIN_COUNT = 4
 
 
 def _reject_if_hallucinated(tool: DetectDuctsTool) -> None:
@@ -456,10 +533,37 @@ def _reject_if_hallucinated(tool: DetectDuctsTool) -> None:
         raise VLMError("VLM returned duplicate bboxes — likely hallucinated")
 
     on_grid = sum(
-        1 for s in segments if all(round(c, 1) in _GRID_VALUES for c in s.bbox)
+        1
+        for s in segments
+        if all(abs(c - round(c, 1)) < _TENTH_GRID_TOLERANCE for c in s.bbox)
     )
     if len(segments) >= 4 and on_grid / len(segments) >= _HALLUCINATED_GRID_THRESHOLD:
         raise VLMError("VLM bboxes lie on a tenth-grid — likely hallucinated")
+
+    # Uniform-pattern check — catches column-marker / grid-line hallucinations
+    # that don't trip the tenth-grid heuristic. Real ducts on a plan have
+    # diverse sizes; a row of identical-shaped bboxes is the model copying a
+    # repeating visual element it mistook for ducts.
+    if len(segments) >= _HALLUCINATED_UNIFORM_MIN_COUNT:
+        widths = [abs(s.bbox[2] - s.bbox[0]) for s in segments]
+        heights = [abs(s.bbox[3] - s.bbox[1]) for s in segments]
+        if mean(widths) > 0 and mean(heights) > 0:
+            cv_w = pstdev(widths) / mean(widths)
+            cv_h = pstdev(heights) / mean(heights)
+            if cv_w < _HALLUCINATED_UNIFORM_CV_THRESHOLD and cv_h < _HALLUCINATED_UNIFORM_CV_THRESHOLD:
+                raise VLMError(
+                    f"VLM returned {len(segments)} uniformly-shaped bboxes "
+                    f"(cv_w={cv_w:.3f}, cv_h={cv_h:.3f}) — likely hallucinated"
+                )
+
+
+def _format_bbox_sample(segments: list[VLMSegment], limit: int = 3) -> str:
+    """Render the first ``limit`` segment bboxes for log lines."""
+    if not segments:
+        return "[]"
+    sample = [tuple(round(v, 3) for v in s.bbox) for s in segments[:limit]]
+    suffix = "" if len(segments) <= limit else f"+{len(segments) - limit}more"
+    return f"{sample}{suffix}"
 
 
 def normalize_to_pixels(
