@@ -23,9 +23,18 @@ from PIL.Image import Image
 from pydantic import ValidationError
 
 from app.vlm.base import VLMClient, VLMError
-from app.vlm.tools import CategorizePageTool, DetectDuctsTool, DetectionResult, VLMSegment
+from app.vlm.reviewer import ReviewerVerdict
+from app.vlm.tools import (
+    CategorizePageTool,
+    DetectDuctsTool,
+    DetectionResult,
+    RefineSegmentTool,
+    ReviewSegmentTool,
+    VLMSegment,
+)
 
 if TYPE_CHECKING:
+    from app.pipeline.base import VLMSegmentDraft
     from app.pipeline.legend import Legend
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -137,6 +146,81 @@ class OllamaVisionClient(VLMClient):
                 f"VLM categorize JSON failed schema: {exc.error_count()} errors"
             ) from exc
 
+    def review_segment(
+        self,
+        crop: Image,
+        segment: VLMSegmentDraft,
+        legend: Legend | None,
+    ) -> ReviewerVerdict:
+        """Reviewer call (SOLUTION-DESIGN-V2 §5.6, ADR-0009).
+
+        Same JSON-mode posture as ``detect`` and ``categorize_region``: prompt
+        for a tiny typed payload, validate with Pydantic, surface schema
+        failures as VLMError. Discrete verdict only — no continuous scores.
+        The calling stage (``ReviewerStage``) handles per-segment exceptions
+        as "this segment stays not_reviewed", so we let validation errors
+        bubble up here.
+        """
+        prompt = _render_review_prompt(segment, legend)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(crop)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM review_segment")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM review JSON invalid: {exc}") from exc
+        try:
+            return ReviewSegmentTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM review JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+
+    def refine_segment(
+        self,
+        crop: Image,
+        *,
+        critique: str,
+        previous: VLMSegmentDraft,
+    ) -> RefineSegmentTool:
+        """Refinement call (SOLUTION-DESIGN-V2 §5.6, ADR-0009).
+
+        Reads the refine_segment prompt template, substitutes critique +
+        previous-detection blocks, posts the crop. Output coords are in the
+        crop's own [0, 1] frame; the calling stage projects back to source
+        space (mirrors the per-tile projection in detect_tiled).
+        """
+        prompt = _render_refine_prompt(critique, previous)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(crop)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM refine_segment")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM refine JSON invalid: {exc}") from exc
+        try:
+            return RefineSegmentTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM refine JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self._host_url}{path}"
         try:
@@ -186,6 +270,64 @@ def _render_tile_prompt(
         .replace("{LEGEND_BLOCK}", legend_block)
         .replace("{TILE_POSITION_BLOCK}", tile_position_block)
         .replace("{TRAIL_CONTEXT_BLOCK}", trail_block)
+    )
+
+
+def _render_review_prompt(
+    segment: VLMSegmentDraft, legend: Legend | None
+) -> str:
+    """Inject segment + legend blocks into the review_segment template.
+
+    Same templating posture as ``_render_tile_prompt`` — keeps prompt files
+    out of the version-pinned ``detect_*.md`` lookup. Reviewer prompts are
+    templated, not version-pinned.
+    """
+    template_path = _PROMPTS_DIR / "review_segment.txt"
+    if not template_path.exists():
+        raise VLMError("review prompt template missing: review_segment.txt")
+    template = template_path.read_text(encoding="utf-8")
+
+    return (
+        template
+        .replace("{SEGMENT_CONTEXT_BLOCK}", _format_segment_context(segment))
+        .replace("{LEGEND_BLOCK}", _format_legend_block(legend))
+    )
+
+
+def _render_refine_prompt(critique: str, previous: VLMSegmentDraft) -> str:
+    """Inject critique + previous-detection blocks into the refine template."""
+    template_path = _PROMPTS_DIR / "refine_segment.txt"
+    if not template_path.exists():
+        raise VLMError("refine prompt template missing: refine_segment.txt")
+    template = template_path.read_text(encoding="utf-8")
+
+    critique_block = critique.strip() or "(no critique provided)"
+    return (
+        template
+        .replace("{CRITIQUE_BLOCK}", critique_block)
+        .replace("{PREVIOUS_BLOCK}", _format_segment_context(previous))
+    )
+
+
+def _format_segment_context(segment: VLMSegmentDraft) -> str:
+    """Render a draft segment as a short, readable block for the prompt.
+
+    The reviewer cares about shape_hint and nearby_text for the domain-prior
+    checks; geometry is rendered as the source-space rect so the agent can
+    cross-reference what it sees in the crop with where the box came from.
+    """
+    pts = segment.geometry.points
+    if len(pts) >= 2:
+        (x0, y0), (x1, y1) = pts[0], pts[1]
+        bbox_str = f"({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f})"
+    else:
+        bbox_str = "(unknown)"
+    nearby = ", ".join(segment.nearby_text) if segment.nearby_text else "(none)"
+    return (
+        f"id: {segment.segment_id}\n"
+        f"bbox (source coords): {bbox_str}\n"
+        f"shape_hint: {segment.shape_hint}\n"
+        f"nearby_text: {nearby}"
     )
 
 

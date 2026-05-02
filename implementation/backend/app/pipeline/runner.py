@@ -18,9 +18,11 @@ from app.pipeline.classify import PressureClassClassifier
 from app.pipeline.detect_tiled import TiledDuctDetectionStage
 from app.pipeline.extract import TextExtractionStage
 from app.pipeline.ingest import IngestStage
+from app.pipeline.legend import LegendParserStage
 from app.pipeline.probe_ocr import ProbeOCRStage
 from app.pipeline.quality import QualityCheckStage
 from app.pipeline.regions import RegionDetectStage
+from app.pipeline.review import ReviewerStage
 from app.schemas import DrawingResult
 from app.vlm.base import VLMClient
 
@@ -64,9 +66,15 @@ class DetectionPipeline:
         return [
             ProbeOCRStage(self._ocr),
             PageCategorizerStage(self._vlm),
+            LegendParserStage(self._vlm),
             QualityCheckStage(self._ocr),
             RegionDetectStage(self._vlm),
             TiledDuctDetectionStage(self._vlm),
             TextExtractionStage(self._ocr),
             PressureClassClassifier(),
+            # Reviewer takes the OllamaVisionClient as both VLMClient and
+            # ReviewerClient — the same instance implements both Protocols
+            # (PR-6). The reviewer mutates segments_draft in place; assemble
+            # plumbs review_verdict / review_iterations into final Segments.
+            ReviewerStage(self._vlm, self._vlm),
         ]

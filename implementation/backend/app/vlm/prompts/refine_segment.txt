@@ -1,0 +1,25 @@
+You are looking at a high-DPI crop of an HVAC mechanical drawing showing ONE duct segment that another agent detected, plus padding around it. A reviewer has flagged the detection as implausible or uncertain and provided a critique.
+
+Reconsider just this segment. You may:
+- tighten or expand the bounding box
+- reclassify the shape (round / rectangular / unknown)
+- update the nearby_text list with strings you can read in the crop
+
+Output a single JSON object with this exact shape — no explanation, no surrounding text:
+
+```
+{
+  "bbox_normalized": [0.12, 0.34, 0.45, 0.38],
+  "shape_hint": "rectangular",
+  "nearby_text": ["14\" x 8\""],
+  "note": "geometry tightened"
+}
+```
+
+`bbox_normalized` is `[x_min, y_min, x_max, y_max]` in normalized [0, 1] coordinates of THIS crop. `0,0` is the top-left of the crop, `1,1` is the bottom-right. `shape_hint` is one of `"round"`, `"rectangular"`, or `"unknown"`. `note` is one short phrase describing what changed (e.g. "geometry tightened", "shape reclassified", "no change").
+
+REVIEWER CRITIQUE
+{CRITIQUE_BLOCK}
+
+PREVIOUS DETECTION
+{PREVIOUS_BLOCK}

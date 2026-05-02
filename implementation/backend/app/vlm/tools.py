@@ -62,3 +62,30 @@ class CategorizePageTool(BaseModel):
         "section_detail",
         "unknown",
     ]
+
+
+class ReviewSegmentTool(BaseModel):
+    """Reviewer wire format (SOLUTION-DESIGN-V2 §5.6, §6.3).
+
+    Discrete verdict only — no continuous confidence score. Small models
+    fabricate floats; the system handles the band promotion in code (see
+    ``app.pipeline.review._bump_confidence``).
+    """
+
+    verdict: Literal["plausible", "implausible", "uncertain"]
+    reason: str  # one short sentence — why the verdict
+
+
+class RefineSegmentTool(BaseModel):
+    """Refinement wire format (SOLUTION-DESIGN-V2 §5.6, §6.3).
+
+    Output of ``VLMClient.refine_segment`` — one segment with possibly
+    revised geometry, given the reviewer's critique and the previous
+    detection. ``bbox_normalized`` is in the refinement crop's own coord
+    space, mirroring the per-tile ``VLMSegment.bbox`` convention.
+    """
+
+    bbox_normalized: tuple[float, float, float, float]
+    shape_hint: ShapeHint
+    nearby_text: list[str] = Field(default_factory=list)
+    note: str  # e.g. "geometry tightened" / "shape reclassified"

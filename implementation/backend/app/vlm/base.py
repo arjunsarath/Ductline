@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from PIL.Image import Image
 
+    from app.pipeline.base import VLMSegmentDraft
     from app.pipeline.legend import Legend
-    from app.vlm.tools import CategorizePageTool, DetectionResult
+    from app.vlm.tools import CategorizePageTool, DetectionResult, RefineSegmentTool
 
 
 class VLMError(Exception):
@@ -42,5 +43,26 @@ class VLMClient(Protocol):
         dicts in the CURRENT tile's coord space — segments already detected in
         tiles to the left in this row + tiles in previous rows. ``legend`` is
         the parsed drawing legend (PR-4); None means "no legend context".
+        """
+        ...
+
+    def refine_segment(
+        self,
+        crop: Image,
+        *,
+        critique: str,
+        previous: VLMSegmentDraft,
+    ) -> RefineSegmentTool:
+        """Refine one segment given the reviewer's critique (SOLUTION-DESIGN-V2 §5.6).
+
+        ``crop`` is a high-DPI render of the segment bbox + padding, rendered
+        fresh by the reviewer stage (same crop the reviewer saw). ``critique``
+        is the reviewer's one-sentence ``reason`` — passed verbatim into the
+        prompt. ``previous`` carries the draft as it stood before this
+        iteration so the model can reconsider geometry/shape rather than
+        starting from scratch.
+
+        Output ``bbox_normalized`` is in the crop's own [0, 1] coord space —
+        the calling stage projects back into source coords.
         """
         ...

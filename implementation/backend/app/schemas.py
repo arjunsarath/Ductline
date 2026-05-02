@@ -61,6 +61,11 @@ class ReasoningStep(_Frozen):
 
     stage: str  # e.g. 'vlm_detect', 'ocr_callout', 'schedule_lookup'
     evidence: str
+    # Populated only on reviewer steps (stage="reviewer_critique" /
+    # "reviewer_refine") so the popover can group iterations 1..N together
+    # under a single reviewer "thread". None elsewhere — the existing v1
+    # stages do not loop. (SOLUTION-DESIGN-V2 §6.2.)
+    iteration: int | None = None
 
 
 class Segment(_Frozen):
@@ -69,6 +74,14 @@ class Segment(_Frozen):
     dimension: Dimension | None  # None when stage 5 found no callout in range
     pressure_class: PressureClass
     reasoning_trace: list[ReasoningStep]
+    # Reviewer outcome (SOLUTION-DESIGN-V2 §5.6, §6.2). "not_reviewed" means
+    # the reviewer stage did not run on this segment — either it was skipped
+    # for budget reasons, the per-segment review failed, or the stage itself
+    # degraded. Defaults keep this backwards-compatible with v1 callers.
+    review_verdict: Literal[
+        "plausible", "implausible", "uncertain", "not_reviewed"
+    ] = "not_reviewed"
+    review_iterations: int = 0
 
 
 class Quality(_Frozen):

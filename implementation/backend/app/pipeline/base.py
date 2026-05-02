@@ -61,6 +61,14 @@ class VLMSegmentDraft:
     shape_hint: str  # 'round' | 'rectangular' | 'unknown'
     nearby_text: list[str]
     reasoning_trace: list[ReasoningStep] = field(default_factory=list)
+    # Reviewer outcome carried from PR-6 (SOLUTION-DESIGN-V2 §5.6). Plain
+    # ``str`` rather than a Literal — dataclass + Literal would force a
+    # runtime import of ``typing.Literal`` at module load and the field
+    # values are constrained at the schema layer (``Segment.review_verdict``).
+    # Default ``"not_reviewed"`` keeps drafts backwards-compatible with the
+    # tiled-detect output which never set this field.
+    review_verdict: str = "not_reviewed"
+    review_iterations: int = 0
 
 
 @dataclass

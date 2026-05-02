@@ -48,12 +48,22 @@ def assemble_result(ctx: PipelineContext) -> DrawingResult:
 
 
 def _build_segment(ctx: PipelineContext, draft: VLMSegmentDraft) -> Segment:
+    # Reviewer outcome (SOLUTION-DESIGN-V2 §5.6) is carried on the draft so
+    # the reviewer stage doesn't need a parallel ctx field. Drafts that pre-
+    # date the reviewer (or were produced when the stage degraded) keep the
+    # default "not_reviewed" / 0 — handled at the dataclass field level.
+    verdict = draft.review_verdict
+    if verdict not in ("plausible", "implausible", "uncertain", "not_reviewed"):
+        # Defensive — narrows the dataclass ``str`` to the schema's Literal.
+        verdict = "not_reviewed"
     return Segment(
         id=draft.segment_id,
         geometry=draft.geometry,
         dimension=ctx.dimensions.get(draft.segment_id),
         pressure_class=ctx.pressure_classes[draft.segment_id],
         reasoning_trace=draft.reasoning_trace,
+        review_verdict=verdict,  # type: ignore[arg-type]  # narrowed above
+        review_iterations=draft.review_iterations,
     )
 
 
