@@ -65,20 +65,70 @@ def _match(height: int, *, text: str = "x", confidence: float = 0.9) -> OCRMatch
 
 
 def test_probe_ocr_text_layer_path(vector_pdf_long_text_bytes: bytes) -> None:
-    """Vector PDF with > 100 text-layer chars uses font sizes directly."""
+    """Vector PDF with > 100 text-layer chars uses font sizes directly.
+
+    Also asserts that ``OCRMatch`` entries are synthesised from text spans —
+    the Page Categorizer (V2 §5.3) keyword-classifies regions from these
+    matches, so an empty list would force its whole-page fallback.
+    """
     ctx = _ingest(vector_pdf_long_text_bytes, "vector.pdf")
     # Stub never gets called on the text-layer path; an empty stub proves it.
     ctx = ProbeOCRStage(_StubOCR(matches=[])).run(ctx)
 
     assert ctx.ocr_cache is not None
     assert ctx.ocr_cache.source == "pdf_text_layer"
-    assert ctx.ocr_cache.matches == []
     assert ctx.ocr_cache.probe_dpi_used == settings.probe_dpi
 
     # Smallest font is 8 pt → 8 * probe_dpi / 72 px.
     expected_px = 8.0 * settings.probe_dpi / 72.0
     assert ctx.ocr_cache.smallest_text_height_px_p5 == pytest.approx(expected_px, rel=0.01)
+
+    # Three lines were inserted → at least three spans should appear as matches.
+    assert len(ctx.ocr_cache.matches) >= 3
+    blob = " ".join(m.text for m in ctx.ocr_cache.matches).upper()
+    assert "DUCT SCHEDULE" in blob or "SA-1" in blob
+    # Pixel conversion sanity: every match has positive width and height.
+    for m in ctx.ocr_cache.matches:
+        assert m.bbox[2] > 0
+        assert m.bbox[3] > 0
+        assert m.confidence == pytest.approx(1.0)
+
     assert ctx.errors == []
+    assert ctx.source is not None
+    ctx.source.close()
+
+
+def test_probe_ocr_text_layer_skips_empty_spans() -> None:
+    """Whitespace-only text spans are filtered out — they add noise to the
+    Page Categorizer's keyword classification.
+    """
+    import pymupdf  # noqa: PLC0415 — local import keeps the fixture inline.
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text(
+        (72, 144),
+        "DUCT SCHEDULE — SA-1: 14\" round, LOW pressure. SA-2: 10\" x 8\" rect.",
+        fontsize=11,
+    )
+    page.insert_text(
+        (72, 200),
+        "PLAN VIEW — first floor mechanical layout, supply and return ducts.",
+        fontsize=11,
+    )
+    # A whitespace-only line — must not appear in the synthesised matches.
+    page.insert_text((72, 260), "     ", fontsize=11)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    ctx = _ingest(pdf_bytes, "whitespace.pdf")
+    ctx = ProbeOCRStage(_StubOCR(matches=[])).run(ctx)
+
+    assert ctx.ocr_cache is not None
+    assert ctx.ocr_cache.source == "pdf_text_layer"
+    for m in ctx.ocr_cache.matches:
+        assert m.text.strip() != ""
+
     assert ctx.source is not None
     ctx.source.close()
 

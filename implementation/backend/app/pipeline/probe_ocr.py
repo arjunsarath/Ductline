@@ -19,7 +19,7 @@ import logging
 from typing import Any
 
 from app.config import settings
-from app.ocr.base import OCRExtractor
+from app.ocr.base import OCRExtractor, OCRMatch
 from app.ocr.cache import OCRCache
 from app.pipeline.base import PipelineContext, PipelineStage
 
@@ -65,14 +65,40 @@ class ProbeOCRStage(PipelineStage):
     # ── Text-layer fast path ─────────────────────────────────────────────────
 
     def _build_from_text_layer(self, page: Any) -> OCRCache:
-        """Read PDF font sizes directly. ``size`` is in PDF points (1/72 inch)."""
+        """Read PDF font sizes directly. ``size`` is in PDF points (1/72 inch).
+
+        Also synthesises ``OCRMatch`` entries from each text span — the Page
+        Categorizer (SOLUTION-DESIGN-V2 §5.3) keyword-classifies Hough-line
+        rectangles by the OCR matches contained in them, so an empty match
+        list would force every vector PDF down its whole-page fallback.
+        """
+        # PDF span bbox is (x0, y0, x1, y1) in points; convert to raster_probe
+        # pixel space (x, y, w, h) so matches share the OCR-fallback convention.
+        pt_to_px = settings.probe_dpi / 72.0
+
         sizes_pt: list[float] = []
+        matches: list[OCRMatch] = []
         for block in page.get_text("dict").get("blocks", []):
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
                     size = span.get("size")
                     if isinstance(size, int | float) and size > 0:
                         sizes_pt.append(float(size))
+
+                    text = str(span.get("text", "")).strip()
+                    if not text:
+                        continue
+                    bbox_pt = span.get("bbox")
+                    if not (isinstance(bbox_pt, list | tuple) and len(bbox_pt) == 4):
+                        continue
+                    x0, y0, x1, y1 = (float(v) for v in bbox_pt)
+                    x_px = int(round(x0 * pt_to_px))
+                    y_px = int(round(y0 * pt_to_px))
+                    w_px = int(round((x1 - x0) * pt_to_px))
+                    h_px = int(round((y1 - y0) * pt_to_px))
+                    matches.append(
+                        OCRMatch(text=text, bbox=(x_px, y_px, w_px, h_px), confidence=1.0)
+                    )
 
         if not sizes_pt:
             # Text layer claimed > 100 chars but yielded no sizes — fall through
@@ -84,7 +110,7 @@ class ProbeOCRStage(PipelineStage):
         smallest_px = smallest_pt * settings.probe_dpi / 72.0
 
         return OCRCache(
-            matches=[],
+            matches=matches,
             smallest_text_height_px_p5=smallest_px,
             source="pdf_text_layer",
             probe_dpi_used=settings.probe_dpi,
