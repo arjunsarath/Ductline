@@ -15,7 +15,7 @@ import type { DrawingResult } from "./types/api";
 type View =
   | { kind: "upload" }
   | { kind: "processing"; filename: string }
-  | { kind: "result"; filename: string; result: DrawingResult }
+  | { kind: "result"; filename: string; file: File; result: DrawingResult }
   | { kind: "error"; filename: string; message: string };
 
 export default function App() {
@@ -25,7 +25,9 @@ export default function App() {
     setView({ kind: "processing", filename: file.name });
     try {
       const result = await detectDrawing(file);
-      setView({ kind: "result", filename: file.name, result });
+      // Carry the original File alongside the result so the PDF.js renderer
+      // can read its bytes without a re-fetch (V2 §5.7).
+      setView({ kind: "result", filename: file.name, file, result });
     } catch (err) {
       const message = err instanceof Error ? err.message : "unknown error";
       setView({ kind: "error", filename: file.name, message });
@@ -43,6 +45,7 @@ export default function App() {
       return (
         <ResultView
           filename={view.filename}
+          file={view.file}
           result={view.result}
           onReset={handleReset}
         />

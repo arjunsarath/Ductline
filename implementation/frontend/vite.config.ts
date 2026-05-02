@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -20,5 +21,14 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },
+  },
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test/setup.ts"],
+    css: false,
+    // tsc -b in `npm run build` emits compiled .js next to .tsx — restrict
+    // test discovery to TypeScript sources so we don't double-run.
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

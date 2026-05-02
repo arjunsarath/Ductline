@@ -31,7 +31,15 @@ export interface PressureClass {
 export interface ReasoningStep {
   stage: string;
   evidence: string;
+  /** Populated only for reviewer steps (V2 §6.2). */
+  iteration?: number;
 }
+
+export type ReviewVerdict =
+  | "plausible"
+  | "implausible"
+  | "uncertain"
+  | "not_reviewed";
 
 export interface Segment {
   id: string;
@@ -39,6 +47,10 @@ export interface Segment {
   dimension: Dimension | null;
   pressure_class: PressureClass;
   reasoning_trace: ReasoningStep[];
+  /** Reviewer verdict (V2 §6.2). Optional — backend may not emit until PR-6. */
+  review_verdict?: ReviewVerdict;
+  /** Number of reviewer refinement iterations (V2 §6.2). */
+  review_iterations?: number;
 }
 
 export interface Quality {
@@ -73,4 +85,15 @@ export interface DrawingResult {
   segments: Segment[];
   aggregate: AggregateStats;
   errors: string[];
+  /**
+   * Renderer routing (V2 §6.2 / ADR-0007). Backend already emits this today.
+   *   "pdf_points" — vector PDF; geometry in PDF points.
+   *   "pixels"     — raster (PNG/JPG/raster_pdf); geometry in pixel coords.
+   */
+  coord_space: "pdf_points" | "pixels";
+  /** Page size in PDF points; populated for vector inputs (V2 §6.2). */
+  page_size_pt?: [number, number] | null;
+  /** Forward-compat: full PageLayout/Legend shapes land with PR-3/PR-4. */
+  layout?: unknown;
+  legend?: unknown;
 }

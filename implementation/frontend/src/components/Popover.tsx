@@ -5,7 +5,12 @@
  */
 
 import { useEffect, useRef } from "react";
-import type { Confidence, Segment } from "../types/api";
+import type {
+  Confidence,
+  ReasoningStep,
+  ReviewVerdict,
+  Segment,
+} from "../types/api";
 
 interface Props {
   segment: Segment;
@@ -52,6 +57,7 @@ export function Popover({ segment, anchor, onClose }: Props) {
 
       <DimensionSection segment={segment} />
       <PressureClassSection segment={segment} />
+      <ReviewerSection segment={segment} />
 
       <footer className="popover-foot">
         <span>
@@ -114,6 +120,52 @@ function PressureClassSection({ segment }: { segment: Segment }) {
       )}
     </section>
   );
+}
+
+function ReviewerSection({ segment }: { segment: Segment }) {
+  // Reviewer steps land in the trace at stages "reviewer_critique" /
+  // "reviewer_refine" (V2 §6.2). When the backend hasn't emitted any (today's
+  // main, pre-PR-6), this section renders nothing — the popover looks
+  // identical to v1.
+  const reviewerSteps = segment.reasoning_trace.filter(isReviewerStep);
+  if (reviewerSteps.length === 0) return null;
+
+  // Per V2 §5.7: per-step verdict isn't emitted today; use the segment-
+  // terminal verdict as the colouring proxy. When unknown/missing, fall back
+  // to "uncertain" tone so the row still renders something legible.
+  const verdict: ReviewVerdict = segment.review_verdict ?? "uncertain";
+  const tone = critiqueToneClass(verdict);
+
+  return (
+    <section className="popover-section popover-section--reviewer">
+      <div className="popover-section-label">Reviewer</div>
+      {reviewerSteps.map((step, index) => (
+        <div key={`${step.stage}-${index}`} className={`critique-row ${tone}`}>
+          <span className="critique-evidence">{step.evidence}</span>
+          {step.iteration !== undefined && step.iteration > 1 && (
+            <span className="critique-iter">· iter {step.iteration}</span>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function isReviewerStep(step: ReasoningStep): boolean {
+  return step.stage === "reviewer_critique" || step.stage === "reviewer_refine";
+}
+
+function critiqueToneClass(verdict: ReviewVerdict): string {
+  switch (verdict) {
+    case "plausible":
+      return "critique-plausible";
+    case "implausible":
+      return "critique-implausible";
+    case "uncertain":
+    case "not_reviewed":
+    default:
+      return "critique-uncertain";
+  }
 }
 
 function ConfidencePill({ confidence }: { confidence: Confidence }) {

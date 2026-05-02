@@ -22,11 +22,12 @@ import {
 
 interface Props {
   filename: string;
+  file: File;
   result: DrawingResult;
   onReset: () => void;
 }
 
-export function ResultView({ filename, result, onReset }: Props) {
+export function ResultView({ filename, file, result, onReset }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [grayscale, setGrayscale] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -126,6 +127,7 @@ export function ResultView({ filename, result, onReset }: Props) {
       <div className="result-body">
         <Viewer
           result={result}
+          file={file}
           selectedId={selectedId}
           grayscale={grayscale}
           viewport={viewport}

@@ -1234,3 +1234,39 @@ a {
   font-weight: 500;
   color: var(--text-muted);
 }
+
+/* ── Reviewer critique rows (V2 §5.7) ────────────────────────────────────── */
+
+.popover-section--reviewer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.critique-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.critique-evidence {
+  flex: 1;
+}
+
+.critique-plausible {
+  color: #059669;
+}
+.critique-uncertain {
+  color: #b45309;
+}
+.critique-implausible {
+  color: #dc2626;
+}
+
+.critique-iter {
+  color: #5c6166;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
