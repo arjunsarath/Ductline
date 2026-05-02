@@ -1,0 +1,10 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# Stray tsc emit — this project authors only .ts/.tsx in src/; any .js
+# next to a .ts/.tsx sibling is build pollution from a stray `tsc` run
+# without --noEmit. Keep src/ clean.
+src/**/*.js
+src/**/*.d.ts
+!src/vite-env.d.ts
