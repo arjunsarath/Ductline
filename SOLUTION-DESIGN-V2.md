@@ -307,7 +307,9 @@ class DrawingSource(BaseModel):
 # app/pipeline/categorize.py — NEW
 class PageCategorizerStage(PipelineStage):
     name = "page_categorize"
-    def __init__(self, vlm: VLMClient, ocr_cache: OCRCache) -> None: ...
+    def __init__(self, vlm: VLMClient) -> None: ...
+    # Reads ctx.ocr_cache at run() time (populated by ProbeOCRStage). Per-request
+    # state is never injected via __init__ — stages take engines/clients only.
     # Output: ctx.layout: PageLayout
 
 class PageLayout(BaseModel):
@@ -320,7 +322,8 @@ class PageLayout(BaseModel):
 # app/pipeline/legend.py — NEW
 class LegendParserStage(PipelineStage):
     name = "legend_parse"
-    def __init__(self, vlm: VLMClient, ocr_cache: OCRCache) -> None: ...
+    def __init__(self, vlm: VLMClient) -> None: ...
+    # Reads ctx.ocr_cache and ctx.layout.legend at run() time.
     # Output: ctx.legend: Legend | None
 
 class Legend(BaseModel):
