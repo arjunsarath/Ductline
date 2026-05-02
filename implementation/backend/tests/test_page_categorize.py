@@ -5,6 +5,11 @@ selection, no-plan-view whole-page fallback, named-region classification
 (legend/notes/schedule/title block), VLM fallback for unknown rectangles,
 and stage-level failure degradation.
 
+Six PR-3.6 tests cover the strip-merge geometry (adjacent strips combine,
+strip absorbed by large neighbour, isolated strip picks nearest by centre),
+the diagnostic INFO logging on the picked-plan-view and fallback paths,
+and the LAYOUT keyword regression that fixed drawing 01's categorizer-failed.
+
 Tests construct ``DrawingSource`` + ``OCRCache`` directly so they exercise
 ``PageCategorizerStage`` in isolation — the categorizer never calls the OCR
 engine itself, so its inputs (raster_probe + matches) are the only things
@@ -13,12 +18,18 @@ that need to be set up. Real Ollama is never contacted; VLM is stubbed.
 
 from __future__ import annotations
 
+import logging
+
 from PIL import Image, ImageDraw
 
 from app.ocr.base import OCRMatch
 from app.ocr.cache import OCRCache
 from app.pipeline.base import PipelineContext
-from app.pipeline.categorize import PageCategorizerStage
+from app.pipeline.categorize import (
+    PageCategorizerStage,
+    _is_strip,
+    _merge_strips,
+)
 from app.source.base import DrawingSource
 from app.vlm.tools import CategorizePageTool, DetectionResult
 
@@ -280,3 +291,157 @@ def test_categorizer_failure_is_degradation() -> None:
     assert any(e.startswith("page_categorize:") for e in ctx.errors)
 
 
+# ── PR-3.6: Strip merge geometry ─────────────────────────────────────────────
+
+
+def test_strip_merge_two_adjacent_strips_combine() -> None:
+    """Two narrow strips sharing an edge collapse to one rect.
+
+    With two strips (and nothing else for them to absorb into), the merge
+    pairs them with each other; the result is a single bounding rect of
+    their union. Page is 1000×1000 so the strip threshold is comfortably
+    above the 50-px width of these strips.
+    """
+    page_w, page_h = 1000, 1000
+    # Two stacked strips, both 50 wide, sharing a horizontal edge at y=400.
+    rects = [(100, 200, 150, 400), (100, 400, 150, 600)]
+
+    merged = _merge_strips(rects, page_w, page_h)
+
+    assert len(merged) == 1
+    # Bounding rect of the union spans both originals.
+    assert merged[0] == (100, 200, 150, 600)
+
+
+def test_strip_merge_strip_absorbed_by_large_neighbour() -> None:
+    """A strip touching a large rect is absorbed into the bounding rect.
+
+    The large rect is comfortably above the strip threshold; the strip
+    shares a vertical edge with it and gets pulled into the union.
+    """
+    page_w, page_h = 1000, 1000
+    large = (200, 100, 700, 800)  # 500x700 — not a strip
+    strip = (700, 100, 750, 800)  # 50x700 — strip (width < 0.45*1000)
+    assert _is_strip(strip, page_w, page_h)
+    assert not _is_strip(large, page_w, page_h)
+
+    merged = _merge_strips([large, strip], page_w, page_h)
+
+    assert len(merged) == 1
+    assert merged[0] == (200, 100, 750, 800)
+
+
+def test_strip_merge_isolated_strip_picks_nearest_by_centre() -> None:
+    """A strip sharing no edge with any neighbour falls back to centre distance.
+
+    Two non-adjacent non-strip rects of different sizes are placed so the
+    strip's centre is closer to the smaller one. Without the centre-distance
+    fallback (i.e. relying on shared-edge alone, which is zero for both
+    candidates) the merge would still be deterministic but arbitrary; with
+    the fallback, the nearer rect wins.
+
+    The non-strip rects are sized comfortably above
+    ``_STRIP_MIN_DIM_FRACTION * min(page)`` on each side so they survive
+    the strip check unchanged. The two non-strip rects don't overlap with
+    each other or with the strip — that keeps the geometry of the test
+    obvious (no shared edges, no interior overlaps).
+    """
+    page_w, page_h = 2000, 2000
+    # Two non-overlapping, non-adjacent non-strip rects.
+    near = (50, 50, 1150, 1150)  # 1100x1100 in upper-left
+    far = (900, 900, 1950, 1950)  # 1050x1050 in lower-right
+    # An isolated strip in upper-left region — closer to ``near`` than to
+    # ``far`` by centre distance. near centre = (600, 600); far centre =
+    # (1425, 1425); strip centre = (1180, 360) → dist(near) = ~640, dist(far)
+    # = ~1090. So near wins.
+    strip = (1170, 350, 1190, 370)  # 20x20 — strip, isolated
+    assert _is_strip(strip, page_w, page_h)
+    assert not _is_strip(near, page_w, page_h)
+    assert not _is_strip(far, page_w, page_h)
+
+    merged = _merge_strips([near, far, strip], page_w, page_h)
+
+    # ``far`` survives untouched; ``near`` absorbs the strip.
+    assert len(merged) == 2
+    assert far in merged
+    expected_union = (50, 50, 1190, 1150)
+    assert expected_union in merged
+
+
+def test_categorizer_logs_picked_plan_view(caplog) -> None:  # type: ignore[no-untyped-def]
+    """A successful classification emits a 'plan_view picked' INFO record.
+
+    Uses the same single-plan-view fixture as the happy-path test and asserts
+    on the structured log line so future log-format changes are caught here.
+    """
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+        _match("DRAWN BY: AS", x=420, y=480),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    with caplog.at_level(logging.INFO, logger="app.pipeline.categorize"):
+        PageCategorizerStage(_StubVLM()).run(ctx)
+
+    plan_view_records = [
+        r for r in caplog.records if "plan_view picked" in r.getMessage()
+    ]
+    assert plan_view_records, "expected an INFO record containing 'plan_view picked'"
+    msg = plan_view_records[0].getMessage()
+    # The log line carries the picked rect as a 4-tuple of ints.
+    assert ctx.layout is not None
+    expected = tuple(int(v) for v in ctx.layout.plan_view)
+    assert str(expected) in msg
+
+
+def test_categorizer_logs_fallback_reason(caplog) -> None:  # type: ignore[no-untyped-def]
+    """Fallback path emits an INFO record with the reason."""
+    img = _blank_image(800, 600)
+    src = _raster_source(img)
+    matches = [_match("RANDOM TEXT", x=100, y=100)]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    with caplog.at_level(logging.INFO, logger="app.pipeline.categorize"):
+        PageCategorizerStage(_StubVLM()).run(ctx)
+
+    fallback_records = [
+        r for r in caplog.records if "fallback to whole-page" in r.getMessage()
+    ]
+    assert fallback_records, "expected an INFO record with 'fallback to whole-page'"
+    # Reason follows in parentheses; we don't lock the exact wording, just
+    # that a reason is present so the failure mode is observable.
+    msg = fallback_records[0].getMessage()
+    assert "reason" in msg
+
+
+def test_categorizer_layout_keyword_matches_plan_view() -> None:
+    """PR-3.6 Issue B regression: drawing 01's plan view region is labelled
+    "PARTITIONING HVAC LAYOUT" — none of the original PLAN/LEVEL/FLOOR/
+    MECHANICAL PLAN keywords matched, so the categorizer fell back. We added
+    LAYOUT (and HVAC) to the plan-view keyword set; this test pins that fix
+    so future keyword tuning doesn't silently regress drawing 01.
+    """
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    # Left half: a "LAYOUT" keyword (no PLAN/LEVEL/FLOOR/MECHANICAL).
+    # Right half (lower-right quadrant): title-block keywords.
+    matches = [
+        _match("PARTITIONING HVAC LAYOUT", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+        _match("DRAWN BY: AS", x=420, y=480),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    PageCategorizerStage(_StubVLM()).run(ctx)
+
+    assert ctx.layout is not None
+    # Categorizer must NOT have fallen back to the whole page — the LAYOUT
+    # keyword should have classified the left-half rect as plan_view.
+    assert "categorizer_failed" not in " ".join(ctx.errors)
+    # The picked plan_view contains the LAYOUT text on the left half.
+    px0, py0, px1, py1 = ctx.layout.plan_view
+    assert px0 <= 100 < px1
+    assert py0 <= 100 < py1
