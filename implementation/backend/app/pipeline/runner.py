@@ -17,6 +17,7 @@ from app.pipeline.classify import PressureClassClassifier
 from app.pipeline.detect import DuctDetectionStage
 from app.pipeline.extract import TextExtractionStage
 from app.pipeline.ingest import IngestStage
+from app.pipeline.probe_ocr import ProbeOCRStage
 from app.pipeline.quality import QualityCheckStage
 from app.pipeline.regions import RegionDetectStage
 from app.schemas import DrawingResult
@@ -55,7 +56,12 @@ class DetectionPipeline:
                 ctx.source.close()
 
     def _post_ingest_stages(self) -> list[PipelineStage]:
+        # Probe OCR runs first (SOLUTION-DESIGN-V2 §5.2): it builds the global
+        # text inventory the rest of the pipeline reads from. Quality, regions,
+        # and detect each have their own OCR call sites today; cache-consumption
+        # refactors land in later v2 PRs.
         return [
+            ProbeOCRStage(self._ocr),
             QualityCheckStage(self._ocr),
             RegionDetectStage(self._vlm),
             DuctDetectionStage(self._vlm),

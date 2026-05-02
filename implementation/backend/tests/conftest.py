@@ -29,6 +29,38 @@ def vector_pdf_bytes() -> bytes:
 
 
 @pytest.fixture
+def vector_pdf_long_text_bytes() -> bytes:
+    """A vector PDF with > 100 chars of text at known font sizes (8 pt, 11 pt).
+
+    Used to exercise the Probe OCR text-layer fast path: ``len(get_text())``
+    must exceed 100, and the smallest font size determines the expected
+    smallest_text_height_px_p5 measurement.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    # Two lines at 11 pt — body text, > 100 chars together.
+    page.insert_text(
+        (72, 144),
+        "DUCT SCHEDULE — SA-1: 14\" round, LOW pressure. SA-2: 10\" x 8\" rectangular.",
+        fontsize=11,
+    )
+    page.insert_text(
+        (72, 200),
+        "PLAN VIEW — first floor mechanical layout, supply and return air ductwork.",
+        fontsize=11,
+    )
+    # One line at 8 pt — the smallest text on the page; sets the p5 floor.
+    page.insert_text(
+        (72, 260),
+        "Notes: refer to specification 23 31 13 for SMACNA sealing class.",
+        fontsize=8,
+    )
+    buf = doc.tobytes()
+    doc.close()
+    return buf
+
+
+@pytest.fixture
 def raster_pdf_bytes() -> bytes:
     """A single-page PDF that contains an embedded image and no text layer."""
     img = Image.new("RGB", (400, 300), color="white")

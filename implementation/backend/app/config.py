@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # stages that still need a raster to reason over). Lower than raster_dpi
     # because vector tiles re-render losslessly on demand.
     probe_dpi: int = 150
+    # SOLUTION-DESIGN-V2 §5.2 — safety cap on smart-DPI re-renders. 600 DPI on
+    # the largest benchmark tile is the upper bound before Ollama's request
+    # payload limit becomes a risk (open question §9.3).
+    smart_dpi_ceiling: int = 600
+    # SOLUTION-DESIGN-V2 §5.2 — target pixel height for the smallest text in a
+    # tile. ~22 px is the readability floor for llama3.2-vision's tokenizer.
+    probe_text_target_px: int = 22
 
     # Upload limits — SOLUTION-DESIGN §9.
     max_upload_bytes: int = 50 * 1024 * 1024

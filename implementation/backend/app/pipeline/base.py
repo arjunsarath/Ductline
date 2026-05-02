@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from app.ocr.cache import OCRCache
     from app.schemas import (
         Dimension,
         Geometry,
@@ -78,6 +79,9 @@ class PipelineContext:
     # the source kind.
     width_px: int = 0
     height_px: int = 0
+
+    # Probe OCR (SOLUTION-DESIGN-V2 §5.2) — runs before quality in v2.
+    ocr_cache: OCRCache | None = None
 
     # Stage 2 — Quality
     quality: Quality | None = None
