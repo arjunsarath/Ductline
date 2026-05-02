@@ -29,17 +29,20 @@ _DISPLAY_MAX_LONG_EDGE_PX = 2000
 
 
 def assemble_result(ctx: PipelineContext) -> DrawingResult:
-    assert ctx.image is not None, "ingest must produce an image before assemble runs"
+    assert ctx.source is not None, "ingest must produce a source before assemble runs"
 
     segments = [_build_segment(ctx, draft) for draft in ctx.segments_draft]
+    coord_space = "pdf_points" if ctx.source.kind == "vector_pdf" else "pixels"
     return DrawingResult(
         drawing_id=ctx.drawing_id,
         width_px=ctx.width_px,
         height_px=ctx.height_px,
-        display_image_data_url=_to_display_data_url(ctx.image),
+        display_image_data_url=_to_display_data_url(ctx.source.raster_probe),
         quality=ctx.quality or _empty_quality(),
         segments=segments,
         aggregate=_aggregate(segments),
+        coord_space=coord_space,
+        page_size_pt=ctx.source.page_size_pt,
         errors=ctx.errors,
     )
 

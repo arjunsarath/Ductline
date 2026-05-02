@@ -107,6 +107,10 @@ class DrawingResult(_Frozen):
     back inline so the frontend has exactly one request to make. Detection
     coordinates are in the *original* (`width_px` / `height_px`) space — the
     frontend scales them to the display resolution.
+
+    `coord_space` and `page_size_pt` (ADR-0007) describe the source so the
+    frontend can pick a renderer. Geometry is still emitted in pixel coords in
+    this PR; point-space conversion lands with the tiling work.
     """
 
     drawing_id: str
@@ -116,4 +120,6 @@ class DrawingResult(_Frozen):
     quality: Quality
     segments: list[Segment]
     aggregate: AggregateStats
+    coord_space: Literal["pdf_points", "pixels"]
+    page_size_pt: tuple[float, float] | None = None
     errors: list[str] = Field(default_factory=list)  # Per-stage degradations (§9)

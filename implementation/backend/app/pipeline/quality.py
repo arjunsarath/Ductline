@@ -35,10 +35,11 @@ class QualityCheckStage(PipelineStage):
         self._ocr = ocr
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
-        assert ctx.image is not None, "ingest stage must run before quality"
+        assert ctx.source is not None, "ingest stage must run before quality"
+        image = ctx.source.raster_probe
 
-        blur = laplacian_variance(ctx.image)
-        skew = estimate_skew_degrees(ctx.image)
+        blur = laplacian_variance(image)
+        skew = estimate_skew_degrees(image)
         ocr_conf = self._sample_ocr_confidence(ctx)
 
         warnings: list[str] = []
@@ -65,11 +66,13 @@ class QualityCheckStage(PipelineStage):
         return ctx
 
     def _sample_ocr_confidence(self, ctx: PipelineContext) -> float:
-        assert ctx.image is not None
+        assert ctx.source is not None
         crop_size = min(_OCR_SAMPLE_SIZE_PX, ctx.width_px, ctx.height_px)
         x = (ctx.width_px - crop_size) // 2
         y = (ctx.height_px - crop_size) // 2
-        matches = self._ocr.extract_text(ctx.image, region=(x, y, crop_size, crop_size))
+        matches = self._ocr.extract_text(
+            ctx.source.raster_probe, region=(x, y, crop_size, crop_size)
+        )
         if not matches:
             return 0.0
         return sum(m.confidence for m in matches) / len(matches)

@@ -1,15 +1,22 @@
-"""Stage 1 — Ingest.
+"""Stage 1 — Ingest (ADR-0007).
 
-PDF → 200 DPI raster (pdf2image), PNG/JPG → passthrough. RGB-normalize.
-Reject multi-page PDFs and oversized files per SOLUTION-DESIGN §9.
+Three-way classifier:
+  • vector_pdf   — PDF whose page 0 has >= 50 chars of text. pymupdf opens the
+                   doc; raster_probe is rendered at probe_dpi for stages that
+                   still need a full-sheet raster.
+  • raster_pdf   — PDF with < 50 chars of text and at least one image (a scan
+                   wrapped in PDF). Falls back to v1's pdf2image rasterizer.
+  • raster_image — PNG / JPG. Opened with PIL at native resolution.
 
-Pure algorithmic — no inference, no I/O beyond reading the upload bytes.
+Multi-page PDFs are rejected. Size and dimension caps are preserved verbatim
+from v1.
 """
 
 from __future__ import annotations
 
 from io import BytesIO
 
+import pymupdf
 from pdf2image import convert_from_bytes
 from pdf2image.exceptions import PDFPageCountError
 from PIL import Image, UnidentifiedImageError
@@ -22,8 +29,13 @@ from app.pipeline.base import (
     PipelineStage,
     UnsupportedFileError,
 )
+from app.source.base import DrawingSource
 
 _PDF_MAGIC = b"%PDF"
+# Threshold for vector vs raster PDF classification — drawings exported from
+# CAD tools carry the schedule and callouts as text; scans wrapped in PDF
+# carry only an embedded image and have effectively no text layer.
+_VECTOR_TEXT_THRESHOLD_CHARS = 50
 
 
 class IngestStage(PipelineStage):
@@ -35,11 +47,11 @@ class IngestStage(PipelineStage):
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
         self._enforce_size_cap()
-        image = self._rasterize()
-        self._enforce_dimension_cap(image)
+        source = self._classify_and_load()
+        self._enforce_dimension_cap(source.raster_probe)
 
-        ctx.image = image
-        ctx.width_px, ctx.height_px = image.size
+        ctx.source = source
+        ctx.width_px, ctx.height_px = source.raster_probe.size
         return ctx
 
     # ── Helpers ──────────────────────────────────────────────────────────────
@@ -50,16 +62,57 @@ class IngestStage(PipelineStage):
                 f"upload exceeds {settings.max_upload_bytes // (1024 * 1024)} MB cap"
             )
 
-    def _rasterize(self) -> Image.Image:
+    def _classify_and_load(self) -> DrawingSource:
         # PDF detection by magic bytes — file extension is unreliable from a
         # multipart upload.
         if self._bytes[:4] == _PDF_MAGIC:
-            return self._rasterize_pdf()
-        return self._open_raster_image()
+            return self._load_pdf()
+        return self._load_raster_image()
 
-    def _rasterize_pdf(self) -> Image.Image:
+    def _load_pdf(self) -> DrawingSource:
         try:
-            # last_page=2 lets us detect multi-page without rendering them all.
+            doc = pymupdf.open(stream=self._bytes, filetype="pdf")
+        except Exception as exc:  # noqa: BLE001 — pymupdf raises a variety of types
+            raise UnsupportedFileError("could not read PDF") from exc
+
+        if doc.page_count == 0:
+            doc.close()
+            raise UnsupportedFileError("PDF has no pages")
+        if doc.page_count > 1:
+            doc.close()
+            raise MultiPagePdfError("multi-page PDF — upload one page at a time")
+
+        page = doc.load_page(0)
+        text_len = len(page.get_text())
+
+        if text_len >= _VECTOR_TEXT_THRESHOLD_CHARS:
+            return self._build_vector_source(doc, page)
+
+        # Raster PDF (scan wrapped in PDF). Fall back to v1's pdf2image path
+        # at raster_dpi; the pymupdf doc isn't retained because downstream
+        # stages won't re-render from it.
+        doc.close()
+        return self._build_raster_pdf_source()
+
+    def _build_vector_source(
+        self, doc: pymupdf.Document, page: pymupdf.Page
+    ) -> DrawingSource:
+        page_size_pt = (page.rect.width, page.rect.height)
+        pixmap = page.get_pixmap(dpi=settings.probe_dpi)
+        mode = "RGBA" if pixmap.alpha else "RGB"
+        probe = Image.frombytes(mode, (pixmap.width, pixmap.height), pixmap.samples).convert(
+            "RGB"
+        )
+        return DrawingSource(
+            kind="vector_pdf",
+            pdf_doc=doc,
+            page=page,
+            page_size_pt=page_size_pt,
+            raster_probe=probe,
+        )
+
+    def _build_raster_pdf_source(self) -> DrawingSource:
+        try:
             pages = convert_from_bytes(
                 self._bytes,
                 dpi=settings.raster_dpi,
@@ -68,23 +121,31 @@ class IngestStage(PipelineStage):
         except PDFPageCountError as exc:
             raise UnsupportedFileError("could not read PDF") from exc
 
-        if len(pages) > 1:
-            raise MultiPagePdfError(
-                "multi-page PDF — upload one page at a time"
-            )
         if not pages:
             raise UnsupportedFileError("PDF has no pages")
 
-        return pages[0].convert("RGB")
+        return DrawingSource(
+            kind="raster_pdf",
+            pdf_doc=None,
+            page=None,
+            page_size_pt=None,
+            raster_probe=pages[0].convert("RGB"),
+        )
 
-    def _open_raster_image(self) -> Image.Image:
+    def _load_raster_image(self) -> DrawingSource:
         try:
             image = Image.open(BytesIO(self._bytes))
         except UnidentifiedImageError as exc:
             raise UnsupportedFileError(
                 "unsupported file type — upload PDF, PNG, or JPG"
             ) from exc
-        return image.convert("RGB")
+        return DrawingSource(
+            kind="raster_image",
+            pdf_doc=None,
+            page=None,
+            page_size_pt=None,
+            raster_probe=image.convert("RGB"),
+        )
 
     def _enforce_dimension_cap(self, image: Image.Image) -> None:
         max_dim = settings.max_image_dimension_px

@@ -12,8 +12,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from PIL.Image import Image
-
     from app.schemas import (
         Dimension,
         Geometry,
@@ -21,6 +19,7 @@ if TYPE_CHECKING:
         Quality,
         ReasoningStep,
     )
+    from app.source.base import DrawingSource
 
 
 # ── Exceptions surfaced as HTTP errors by app.api.routes (§9). ────────────────
@@ -72,8 +71,11 @@ class PipelineContext:
     drawing_id: str
     original_filename: str
 
-    # Stage 1 — Ingest
-    image: Image | None = None
+    # Stage 1 — Ingest (ADR-0007)
+    source: DrawingSource | None = None
+    # width_px / height_px continue to mean "raster_probe dimensions" so
+    # consuming stages that still think in pixel space don't have to special-case
+    # the source kind.
     width_px: int = 0
     height_px: int = 0
 

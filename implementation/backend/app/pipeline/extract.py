@@ -31,7 +31,7 @@ class TextExtractionStage(PipelineStage):
         self._ocr = ocr
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
-        assert ctx.image is not None
+        assert ctx.source is not None
 
         for draft in ctx.segments_draft:
             self._extract_segment_dimension(ctx, draft)
@@ -46,7 +46,7 @@ class TextExtractionStage(PipelineStage):
     def _extract_segment_dimension(
         self, ctx: PipelineContext, draft: VLMSegmentDraft
     ) -> None:
-        assert ctx.image is not None
+        assert ctx.source is not None
 
         bbox = _geometry_bbox(draft.geometry)
         search_region = _expand_bbox(
@@ -55,7 +55,7 @@ class TextExtractionStage(PipelineStage):
             max_w=ctx.width_px,
             max_h=ctx.height_px,
         )
-        matches = self._ocr.extract_text(ctx.image, region=search_region)
+        matches = self._ocr.extract_text(ctx.source.raster_probe, region=search_region)
 
         for match in matches:
             confidence_band = _bucket_ocr_confidence(match.confidence)
@@ -92,8 +92,8 @@ class TextExtractionStage(PipelineStage):
     def _extract_schedule_rows(
         self, ctx: PipelineContext, region: Bbox
     ) -> list[list[str]]:
-        assert ctx.image is not None
-        table = self._ocr.extract_table(ctx.image, region)
+        assert ctx.source is not None
+        table = self._ocr.extract_table(ctx.source.raster_probe, region)
         return [[cell.text for cell in row] for row in table.rows]
 
 

@@ -19,25 +19,27 @@ class RegionDetectStage(PipelineStage):
         self._vlm = vlm
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
-        assert ctx.image is not None
+        assert ctx.source is not None
+        image = ctx.source.raster_probe
 
-        title = find_title_block(ctx.image)
+        title = find_title_block(image)
         if title is None:
             title = self._vlm_fallback(ctx)
             if title is not None:
                 ctx.errors.append("region_detect: classical pass failed; VLM fallback used")
 
         ctx.title_block_bbox = title
-        ctx.schedule_bbox = find_schedule(ctx.image, near=title)
+        ctx.schedule_bbox = find_schedule(image, near=title)
         return ctx
 
     def _vlm_fallback(self, ctx: PipelineContext) -> tuple[int, int, int, int] | None:
         """Best-effort VLM disambiguation. We don't fail the pipeline if it returns
         garbage — title block absence just means region context is missing.
         """
+        assert ctx.source is not None
         try:
             response = self._vlm.disambiguate_region(
-                ctx.image,  # type: ignore[arg-type]
+                ctx.source.raster_probe,
                 "Where is the title block on this drawing? Respond with normalized "
                 "[x_min, y_min, x_max, y_max] in [0,1] coordinates as a JSON array. "
                 "If you don't see one, respond with 'none'.",

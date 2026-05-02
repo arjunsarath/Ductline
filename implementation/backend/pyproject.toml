@@ -11,6 +11,8 @@ dependencies = [
     "pydantic==2.9.2",
     "pydantic-settings==2.5.2",
     "pdf2image==1.17.0",
+    # ADR-0007 — vector-PDF source-of-truth; pdf2image kept as the raster_pdf fallback.
+    "pymupdf==1.24.10",
     "Pillow==10.4.0",
     "numpy==1.26.4",
     "opencv-python-headless==4.10.0.84",
@@ -24,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ruff==0.6.9",
+    "pytest==8.3.3",
 ]
 
 [tool.ruff]

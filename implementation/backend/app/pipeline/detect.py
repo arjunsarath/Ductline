@@ -26,10 +26,10 @@ class DuctDetectionStage(PipelineStage):
         self._vlm = vlm
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
-        assert ctx.image is not None
+        assert ctx.source is not None
 
         try:
-            response = self._vlm.detect(ctx.image)
+            response = self._vlm.detect(ctx.source.raster_probe)
             ctx.segments_draft = self._build_drafts_from_vlm(ctx, response.segments)
         except VLMError as exc:
             ctx.errors.append(f"duct_detection: VLM unavailable ({exc}); CV-only fallback")
@@ -40,13 +40,14 @@ class DuctDetectionStage(PipelineStage):
     # ── VLM path ─────────────────────────────────────────────────────────────
 
     def _build_drafts_from_vlm(self, ctx: PipelineContext, segments) -> list[VLMSegmentDraft]:
-        assert ctx.image is not None
+        assert ctx.source is not None
+        image = ctx.source.raster_probe
         bboxes = normalize_to_pixels(segments, ctx.width_px, ctx.height_px)
 
         drafts: list[VLMSegmentDraft] = []
         for index, (segment, bbox) in enumerate(zip(segments, bboxes, strict=False)):
             polyline = refine_segment_geometry(
-                ctx.image, bbox, shape_hint=segment.shape_hint
+                image, bbox, shape_hint=segment.shape_hint
             )
             geometry = (
                 Geometry(type="polyline", points=polyline)
@@ -81,12 +82,13 @@ class DuctDetectionStage(PipelineStage):
     # ── CV-only fallback ─────────────────────────────────────────────────────
 
     def _build_drafts_from_cv(self, ctx: PipelineContext) -> list[VLMSegmentDraft]:
-        assert ctx.image is not None
-        candidates = find_duct_candidates_cv(ctx.image)
+        assert ctx.source is not None
+        image = ctx.source.raster_probe
+        candidates = find_duct_candidates_cv(image)
         drafts: list[VLMSegmentDraft] = []
         for index, bbox in enumerate(candidates):
             polyline = refine_segment_geometry(
-                ctx.image, bbox, shape_hint="rectangular"
+                image, bbox, shape_hint="rectangular"
             )
             drafts.append(
                 VLMSegmentDraft(

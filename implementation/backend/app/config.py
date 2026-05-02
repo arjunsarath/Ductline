@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     # Ingest — 200 DPI is the starting point per SOLUTION-DESIGN §11.
     raster_dpi: int = 200
+    # ADR-0007 — DPI for the vector-PDF raster_probe (full-sheet image used by
+    # stages that still need a raster to reason over). Lower than raster_dpi
+    # because vector tiles re-render losslessly on demand.
+    probe_dpi: int = 150
 
     # Upload limits — SOLUTION-DESIGN §9.
     max_upload_bytes: int = 50 * 1024 * 1024

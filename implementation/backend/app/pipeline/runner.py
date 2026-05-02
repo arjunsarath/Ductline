@@ -40,14 +40,19 @@ class DetectionPipeline:
         # other stage is wrapped so a failure becomes a degradation, not a 500.
         ctx = IngestStage(file_bytes, original_filename).run(ctx)
 
-        for stage in self._post_ingest_stages():
-            try:
-                ctx = stage.run(ctx)
-            except Exception as exc:  # noqa: BLE001 — partial-result by design (§9)
-                logger.exception("stage %s failed", stage.name)
-                ctx.errors.append(f"{stage.name}: {exc}")
+        try:
+            for stage in self._post_ingest_stages():
+                try:
+                    ctx = stage.run(ctx)
+                except Exception as exc:  # noqa: BLE001 — partial-result by design (§9)
+                    logger.exception("stage %s failed", stage.name)
+                    ctx.errors.append(f"{stage.name}: {exc}")
 
-        return assemble_result(ctx)
+            return assemble_result(ctx)
+        finally:
+            # Release the pymupdf Document for vector-PDF sources (ADR-0007).
+            if ctx.source is not None:
+                ctx.source.close()
 
     def _post_ingest_stages(self) -> list[PipelineStage]:
         return [
