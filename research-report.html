@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HVAC Duct Detection — User Research Report (Round 1)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{
+    --bg:#fafaf9; --card:#ffffff; --ink:#0f172a; --ink-2:#475569; --ink-3:#94a3b8;
+    --line:#e2e8f0; --line-2:#cbd5e1;
+    --blue:#2563eb; --blue-bg:#eff6ff;
+    --amber:#ea580c; --amber-bg:#fff7ed;
+    --green:#059669; --green-bg:#ecfdf5;
+    --red:#dc2626; --red-bg:#fef2f2;
+    --slate:#1e293b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:1080px; margin:0 auto; padding:48px 32px 96px}
+  /* HEADER */
+  header.doc{border-bottom:1px solid var(--line); padding-bottom:24px; margin-bottom:48px}
+  header.doc .eyebrow{font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-3); font-weight:600}
+  header.doc h1{font-size:38px; font-weight:700; margin:8px 0 6px; letter-spacing:-.02em; line-height:1.15}
+  header.doc .sub{font-size:17px; color:var(--ink-2); margin:0}
+  header.doc .meta{display:flex; gap:16px; flex-wrap:wrap; margin-top:18px; font-size:13px; color:var(--ink-2)}
+  header.doc .meta .pill{padding:4px 10px; border:1px solid var(--line); border-radius:999px; background:var(--card)}
+  /* SECTIONS */
+  section{margin:56px 0; scroll-margin-top:24px}
+  section.tight{margin:40px 0}
+  h2.section{font-size:11px; font-weight:700; letter-spacing:.18em; text-transform:uppercase; color:var(--blue); margin:0 0 8px}
+  h3.section-title{font-size:26px; font-weight:700; margin:0 0 8px; letter-spacing:-.01em}
+  p.section-lede{font-size:16px; color:var(--ink-2); max-width:760px; margin:0 0 24px}
+  /* EXEC SUMMARY 3-BOX */
+  .summary-grid{display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px}
+  .summary-card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px}
+  .summary-card .tag{font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-3); margin-bottom:10px}
+  .summary-card.research .tag{color:var(--blue)}
+  .summary-card.found .tag{color:var(--amber)}
+  .summary-card.impact .tag{color:var(--green)}
+  .summary-card h4{margin:0 0 10px; font-size:17px; font-weight:600; line-height:1.35}
+  .summary-card p{margin:0; font-size:14px; color:var(--ink-2); line-height:1.6}
+  .summary-card .bar{height:3px; width:32px; border-radius:2px; margin-bottom:16px}
+  .summary-card.research .bar{background:var(--blue)}
+  .summary-card.found .bar{background:var(--amber)}
+  .summary-card.impact .bar{background:var(--green)}
+  /* STAT STRIP */
+  .stat-strip{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:32px 0}
+  .stat{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px}
+  .stat .num{font-size:32px; font-weight:700; line-height:1; color:var(--ink); letter-spacing:-.02em}
+  .stat .lab{font-size:12px; color:var(--ink-2); margin-top:6px; letter-spacing:.02em}
+  .stat .sub-lab{font-size:11px; color:var(--ink-3); margin-top:2px}
+  /* WEDGE VISUAL */
+  .wedge-wrap{background:var(--card); border:1px solid var(--line); border-radius:18px; padding:28px; position:relative; overflow:hidden}
+  .wedge-grid{display:grid; grid-template-columns:1fr 64px 1fr; gap:0; align-items:stretch}
+  .wedge-side{padding:24px}
+  .wedge-side.before{border-right:0; opacity:.85}
+  .wedge-side.after{border-left:0}
+  .wedge-side h5{font-size:11px; font-weight:700; letter-spacing:.18em; text-transform:uppercase; margin:0 0 12px}
+  .wedge-side.before h5{color:var(--red)}
+  .wedge-side.after h5{color:var(--green)}
+  .wedge-headline{font-size:22px; font-weight:700; line-height:1.25; margin:0 0 18px; letter-spacing:-.01em}
+  .wedge-side.before .wedge-headline{text-decoration:line-through; text-decoration-color:rgba(220,38,38,.55); color:var(--ink-2)}
+  .wedge-side.after .wedge-headline{color:var(--ink)}
+  .wedge-side ul{margin:0; padding:0 0 0 18px}
+  .wedge-side li{font-size:14px; color:var(--ink-2); margin:6px 0; line-height:1.5}
+  .wedge-side.before li{color:var(--ink-3)}
+  .wedge-side.after li{color:var(--ink-2)}
+  .wedge-arrow{display:flex; align-items:center; justify-content:center; color:var(--blue)}
+  .wedge-arrow svg{width:48px; height:48px}
+  .wedge-tag{display:inline-block; font-size:11px; padding:3px 8px; border-radius:6px; font-weight:600; letter-spacing:.04em}
+  .wedge-tag.before{background:var(--red-bg); color:var(--red)}
+  .wedge-tag.after{background:var(--green-bg); color:var(--green)}
+  /* VALUE CHAIN */
+  .chain{display:grid; grid-template-columns:repeat(4,1fr); gap:0; position:relative}
+  .chain::before{
+    content:""; position:absolute; top:42px; left:5%; right:5%; height:2px;
+    background:linear-gradient(90deg, var(--blue) 0%, var(--amber) 33%, var(--green) 66%, var(--slate) 100%);
+    border-radius:2px; z-index:0;
+  }
+  .node{position:relative; z-index:1; padding:0 8px}
+  .node .dot{width:18px; height:18px; border-radius:50%; margin:32px auto 14px; border:3px solid var(--card)}
+  .node.designer .dot{background:var(--blue); box-shadow:0 0 0 2px var(--blue)}
+  .node.fab .dot{background:var(--amber); box-shadow:0 0 0 2px var(--amber)}
+  .node.coord .dot{background:var(--green); box-shadow:0 0 0 2px var(--green)}
+  .node.cx .dot{background:var(--slate); box-shadow:0 0 0 2px var(--slate)}
+  .node-card{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 14px 16px; min-height:200px}
+  .node-card .role{font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); margin-bottom:4px}
+  .node-card.designer .role{color:var(--blue)}
+  .node-card.fab .role{color:var(--amber)}
+  .node-card.coord .role{color:var(--green)}
+  .node-card.cx .role{color:var(--slate)}
+  .node-card .name{font-size:16px; font-weight:700; margin-bottom:8px}
+  .node-card .meta{font-size:12px; color:var(--ink-2); margin-bottom:10px}
+  .node-card .jtbd{font-size:13px; color:var(--ink); line-height:1.5; margin-bottom:10px}
+  .node-card .pain-meter{display:flex; gap:3px; margin-bottom:8px}
+  .node-card .pain-meter span{height:6px; flex:1; border-radius:2px; background:var(--line)}
+  .node-card .pain-meter span.on.designer{background:var(--blue)}
+  .node-card .pain-meter span.on.fab{background:var(--amber)}
+  .node-card .pain-meter span.on.coord{background:var(--green)}
+  .node-card .pain-meter span.on.cx{background:var(--slate)}
+  .node-card .label{font-size:10px; color:var(--ink-3); text-transform:uppercase; letter-spacing:.1em}
+  /* JTBD CHART */
+  .chart-frame{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:24px}
+  .chart-axes{position:relative; height:420px}
+  .axis-x-label{position:absolute; bottom:-22px; left:50%; transform:translateX(-50%); font-size:12px; color:var(--ink-2); font-weight:600}
+  .axis-y-label{position:absolute; left:-32px; top:50%; transform:rotate(-90deg) translateX(50%); transform-origin:left top; font-size:12px; color:var(--ink-2); font-weight:600; white-space:nowrap}
+  .chart-legend{display:flex; gap:18px; flex-wrap:wrap; justify-content:flex-start; margin-top:32px; font-size:13px}
+  .legend-item{display:flex; align-items:center; gap:6px}
+  .legend-dot{width:12px; height:12px; border-radius:50%}
+  /* HEATMAP */
+  .heatmap{display:grid; grid-template-columns:1.6fr repeat(4, 1fr); gap:6px; align-items:stretch}
+  .heatmap .hd{font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); padding:8px 10px}
+  .heatmap .row-lab{font-size:13px; color:var(--ink); padding:14px 12px; display:flex; align-items:center}
+  .heatmap .cell{
+    border-radius:8px; padding:14px 8px; display:flex; align-items:center; justify-content:center;
+    font-size:13px; font-weight:600;
+  }
+  .cell[data-v="5"]{background:#7c2d12; color:#fff}
+  .cell[data-v="4"]{background:#c2410c; color:#fff}
+  .cell[data-v="3"]{background:#fb923c; color:#7c2d12}
+  .cell[data-v="2"]{background:#fed7aa; color:#7c2d12}
+  .cell[data-v="1"]{background:#ffedd5; color:#9a3412}
+  .heatmap-legend{display:flex; gap:12px; align-items:center; margin-top:14px; font-size:12px; color:var(--ink-2)}
+  .heatmap-legend .scale{display:flex; gap:0; border-radius:6px; overflow:hidden}
+  .heatmap-legend .scale span{width:24px; height:14px; display:block}
+  /* WORKAROUNDS */
+  .work-row{display:grid; grid-template-columns:2fr 1fr 2fr; gap:14px; align-items:center; padding:12px 0; border-top:1px solid var(--line)}
+  .work-row:first-child{border-top:0}
+  .work-row .w-name{font-size:14px; color:var(--ink); font-weight:500}
+  .work-row .w-pers{font-size:12px; color:var(--ink-2)}
+  .work-row .w-bar{height:24px; border-radius:6px; background:var(--line); position:relative; overflow:hidden}
+  .work-row .w-fill{position:absolute; left:0; top:0; bottom:0; border-radius:6px; display:flex; align-items:center; padding:0 10px; font-size:11px; color:#fff; font-weight:600; letter-spacing:.04em}
+  .w-very-high{background:#7c2d12; width:100%}
+  .w-high{background:#c2410c; width:80%}
+  .w-medium{background:#fb923c; width:55%; color:#7c2d12}
+  .w-adjacent{background:#cbd5e1; width:38%; color:var(--ink)}
+  /* BUYING TIERS */
+  .buying-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:14px}
+  .buyer{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px}
+  .buyer .b-name{font-size:14px; font-weight:700; margin-bottom:2px}
+  .buyer .b-role{font-size:11px; color:var(--ink-3); text-transform:uppercase; letter-spacing:.1em; margin-bottom:14px}
+  .buyer .tier{display:flex; align-items:center; gap:10px; margin-bottom:8px; font-size:12px}
+  .buyer .tier-dot{width:10px; height:10px; border-radius:50%; flex-shrink:0}
+  .buyer .tier-disc .tier-dot{background:var(--green)}
+  .buyer .tier-mid .tier-dot{background:var(--amber)}
+  .buyer .tier-high .tier-dot{background:var(--red)}
+  .buyer .tier-amt{font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums}
+  .buyer .tier-who{color:var(--ink-2); font-size:11px}
+  .buyer .verdict{margin-top:14px; padding-top:14px; border-top:1px solid var(--line); font-size:11px; color:var(--ink-2)}
+  .buyer .verdict strong{color:var(--ink); display:block; font-size:13px; margin-bottom:2px}
+  .buyer.icp{border-color:var(--amber); box-shadow:0 0 0 2px var(--amber-bg)}
+  .buyer.icp .b-role::after{content:" • ICP"; color:var(--amber); font-weight:700}
+  /* REVERSED ASSUMPTIONS */
+  .ra-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  .ra{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; position:relative}
+  .ra .ra-num{position:absolute; top:14px; right:18px; font-size:10px; font-weight:700; letter-spacing:.1em; color:var(--ink-3)}
+  .ra .was{font-size:13px; color:var(--ink-3); text-decoration:line-through; text-decoration-color:rgba(220,38,38,.5); margin-bottom:10px; line-height:1.45}
+  .ra .arrow{font-size:14px; color:var(--blue); margin-bottom:8px}
+  .ra .now{font-size:14px; color:var(--ink); font-weight:600; line-height:1.45; margin-bottom:10px}
+  .ra .src{font-size:11px; color:var(--ink-2); padding-top:10px; border-top:1px solid var(--line)}
+  .ra .src .pname{font-weight:600}
+  .ra.designer .pname{color:var(--blue)}
+  .ra.fab .pname{color:var(--amber)}
+  .ra.coord .pname{color:var(--green)}
+  .ra.cx .pname{color:var(--slate)}
+  /* PRD IMPACT */
+  .prd{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  .prd-row{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px}
+  .prd-row .sec{font-size:11px; font-weight:700; letter-spacing:.1em; color:var(--blue); margin-bottom:4px}
+  .prd-row .from{font-size:12px; color:var(--ink-3); text-decoration:line-through; margin-bottom:4px}
+  .prd-row .to{font-size:14px; color:var(--ink); font-weight:600; line-height:1.4}
+  /* TIMELINE */
+  .timeline{position:relative; padding-left:28px}
+  .timeline::before{content:""; position:absolute; left:9px; top:6px; bottom:6px; width:2px; background:var(--line)}
+  .step{position:relative; padding:0 0 22px}
+  .step:last-child{padding-bottom:0}
+  .step::before{content:""; position:absolute; left:-26px; top:6px; width:14px; height:14px; border-radius:50%; background:var(--card); border:3px solid var(--line)}
+  .step.done::before{background:var(--green); border-color:var(--green)}
+  .step.next::before{background:var(--card); border-color:var(--blue); box-shadow:0 0 0 4px var(--blue-bg)}
+  .step.future::before{background:var(--card); border-color:var(--line-2)}
+  .step .step-meta{font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-3); margin-bottom:4px}
+  .step.done .step-meta{color:var(--green)}
+  .step.next .step-meta{color:var(--blue)}
+  .step h6{font-size:15px; font-weight:700; margin:0 0 6px}
+  .step p{margin:0; font-size:13px; color:var(--ink-2); line-height:1.55}
+  /* METHOD FOOTNOTE */
+  .method{background:var(--blue-bg); border:1px solid #bfdbfe; border-radius:14px; padding:22px; font-size:13px; color:var(--ink-2); line-height:1.6}
+  .method strong{color:var(--ink); font-weight:600}
+  .method .schematic{margin-top:14px; padding-top:14px; border-top:1px dashed #bfdbfe; display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:12px}
+  .method .chip{background:var(--card); padding:6px 12px; border-radius:8px; border:1px solid #bfdbfe; font-weight:600; color:var(--ink)}
+  .method .arr{color:var(--blue); font-weight:700}
+  /* FOOTER */
+  footer{margin-top:64px; padding-top:24px; border-top:1px solid var(--line); font-size:12px; color:var(--ink-3); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px}
+  /* Responsive */
+  @media (max-width: 860px){
+    .summary-grid, .stat-strip, .chain, .buying-grid, .ra-grid, .prd, .heatmap{grid-template-columns:1fr 1fr; gap:10px}
+    .wedge-grid{grid-template-columns:1fr; gap:12px}
+    .wedge-arrow{transform:rotate(90deg)}
+    .heatmap{grid-template-columns:1fr 1fr 1fr 1fr 1fr}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- HEADER -->
+<header class="doc">
+  <div class="eyebrow">User Research · Round 1 · Discovery</div>
+  <h1>HVAC Duct Detection — Synthetic User Research</h1>
+  <p class="sub">Validating the wedge for a duct-detection product across the four-persona drawing lifecycle: design → fabrication → coordination → commissioning.</p>
+  <div class="meta">
+    <span class="pill">2026-05-02</span>
+    <span class="pill">Author: Arjun</span>
+    <span class="pill">Method: Synthetic personas + skeptic agent</span>
+    <span class="pill">Status: v0.1, hypothesis-stage</span>
+  </div>
+</header>
+
+<!-- EXECUTIVE SUMMARY -->
+<section class="tight">
+  <div class="summary-grid">
+    <div class="summary-card research">
+      <div class="bar"></div>
+      <div class="tag">What we researched</div>
+      <h4>Where in the HVAC drawing lifecycle does pressure-class extraction actually create the most value?</h4>
+      <p>Four grounded personas spanning the artifact's life — Dana (MEP designer who creates it), Marco (sub who bids and fabricates from it), Aisha (BIM coordinator who reconciles drawings vs. model), Ben (Cx engineer who verifies installed work). Each was embodied as a subagent grounded in SMACNA + ASHRAE literacy, and every load-bearing claim was pressure-tested by an independent skeptic.</p>
+    </div>
+    <div class="summary-card found">
+      <div class="bar"></div>
+      <div class="tag">What we found</div>
+      <h4>The wedge is real, but it reframes from <em>predict</em> to <em>reconcile</em>.</h4>
+      <p>All four personas independently surfaced the same gap: pressure class lives in the drawing, the schedule, the spec, and the model — and these drift. Existing tools (TaksoAI, PlanSwift, Bluebeam, Navisworks, ACC) extract or visually compare; none reconcile across sources. The buyable pain isn't extraction accuracy — it's the hours spent cross-checking with no audit trail.</p>
+    </div>
+    <div class="summary-card impact">
+      <div class="bar"></div>
+      <div class="tag">How this changes the platform</div>
+      <h4>Six PRD sections update; primary persona resolves to Marco; spec-PDF NLP becomes the moat.</h4>
+      <p>Marco (mech sub estimating principal at 20–200-emp shops) is the ICP — both buyer and user, fastest cycle, clearest ROI math. Aisha (ACC integration) is the v2 enterprise persona. Confidence scores are reframed as triage UX; reasoning transparency becomes the trust mechanism. Spec-PDF ingestion (Section 23 31 13) moves into P0.</p>
+    </div>
+  </div>
+
+  <div class="stat-strip">
+    <div class="stat"><div class="num">4</div><div class="lab">Persona-embodied subagents</div><div class="sub-lab">Dana · Marco · Aisha · Ben</div></div>
+    <div class="stat"><div class="num">24</div><div class="lab">Questions asked in character</div><div class="sub-lab">6 per persona, aligned for cross-comparison</div></div>
+    <div class="stat"><div class="num">10</div><div class="lab">Reversed assumptions</div><div class="sub-lab">Killed or partially-killed by skeptic</div></div>
+    <div class="stat"><div class="num">6</div><div class="lab">PRD sections changing</div><div class="sub-lab">§3, §5, §6, §7, §9, §11.2</div></div>
+  </div>
+</section>
+
+<!-- THE WEDGE REFRAME -->
+<section>
+  <h2 class="section">01 · The Headline Finding</h2>
+  <h3 class="section-title">The wedge isn't <em>prediction</em>. It's <em>reconciliation</em>.</h3>
+  <p class="section-lede">The going-in PRD framed the product as an extractor that predicts pressure class from drawing geometry. Every persona reframed it. Marco predicts pressure class in his head from system topology in two seconds. Dana writes the values. Aisha and Ben need them as ground truth. The unsolved work is reading the spec PDF against the drawing and surfacing where the two disagree.</p>
+
+  <div class="wedge-wrap">
+    <div class="wedge-grid">
+      <div class="wedge-side before">
+        <div class="wedge-tag before">Before</div>
+        <h5>Going-in hypothesis</h5>
+        <div class="wedge-headline">Predict pressure class from drawing geometry</div>
+        <ul>
+          <li>Compete with TaksoAI / PlanSwift on extraction accuracy</li>
+          <li>Plan-view extraction is the technical core</li>
+          <li>Confidence scores build trust</li>
+          <li>Win on 95% accuracy</li>
+          <li>Pitch: "AI takeoff replaces your estimator"</li>
+        </ul>
+      </div>
+      <div class="wedge-arrow" aria-hidden="true">
+        <svg viewBox="0 0 48 48" fill="none">
+          <path d="M8 24h28M28 14l10 10-10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="wedge-side after">
+        <div class="wedge-tag after">After</div>
+        <h5>Surfaced by research</h5>
+        <div class="wedge-headline">Reconcile pressure class across spec + drawing + schedule</div>
+        <ul>
+          <li>Differentiate by reading mechanical specifications (§23 31 13)</li>
+          <li>Spec-PDF NLP is the moat — geometry-only plateaus</li>
+          <li>Reasoning transparency builds trust; confidence triages</li>
+          <li>Win on "shows its work" — cite the schedule cell, the spec section, the AHU schedule</li>
+          <li>Pitch: "Stop the conservative padding that costs you bids"</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- VALUE CHAIN -->
+<section>
+  <h2 class="section">02 · The Drawing Lifecycle</h2>
+  <h3 class="section-title">Four personas, one shared frustration</h3>
+  <p class="section-lede">The same drawing passes through four hands. Each re-extracts the data the previous one already had. Each has a different acute pain — but the universal pain is documentation conflict.</p>
+
+  <div class="chain">
+    <div class="node designer">
+      <div class="dot"></div>
+      <div class="node-card designer">
+        <div class="role">Designer</div>
+        <div class="name">Dana Liu, PE</div>
+        <div class="meta">200-eng MEP firm · NE US · Champion, not buyer</div>
+        <div class="jtbd">Surface spec-vs-schedule-vs-plan conflicts <strong>in her own set</strong> before issuance.</div>
+        <div class="label">Pain</div>
+        <div class="pain-meter"><span class="on designer"></span><span class="on designer"></span><span class="on designer"></span><span></span><span></span></div>
+        <div class="label">Buying tier · 12–18 mo cycle</div>
+      </div>
+    </div>
+    <div class="node fab">
+      <div class="dot"></div>
+      <div class="node-card fab">
+        <div class="role">Fabricator · ICP</div>
+        <div class="name">Marco Reyes</div>
+        <div class="meta">50-emp mech sub · SE US · Buyer + user</div>
+        <div class="jtbd">Reconcile pressure class so he can stop padding gauge and stop losing bids by 1–2%.</div>
+        <div class="label">Pain</div>
+        <div class="pain-meter"><span class="on fab"></span><span class="on fab"></span><span class="on fab"></span><span class="on fab"></span><span class="on fab"></span></div>
+        <div class="label">Buying tier · ~1 wk cycle</div>
+      </div>
+    </div>
+    <div class="node coord">
+      <div class="dot"></div>
+      <div class="node-card coord">
+        <div class="role">Coordinator</div>
+        <div class="name">Aisha Patel</div>
+        <div class="meta">Top-50 ENR GC · TX · Champion, committee buys</div>
+        <div class="jtbd">Get attribute-level diff between drawing revisions, surfaced inside ACC + Navisworks.</div>
+        <div class="label">Pain</div>
+        <div class="pain-meter"><span class="on coord"></span><span class="on coord"></span><span class="on coord"></span><span class="on coord"></span><span></span></div>
+        <div class="label">Buying tier · ~12 mo cycle</div>
+      </div>
+    </div>
+    <div class="node cx">
+      <div class="dot"></div>
+      <div class="node-card cx">
+        <div class="role">Commissioning</div>
+        <div class="name">Ben Okonkwo, CxA</div>
+        <div class="meta">Solo CxA · PNW · Sole buyer + user</div>
+        <div class="jtbd">Build a structured duct inventory from a folder of scanned legacy PDFs in hours, not days.</div>
+        <div class="label">Pain</div>
+        <div class="pain-meter"><span class="on cx"></span><span class="on cx"></span><span class="on cx"></span><span class="on cx"></span><span></span></div>
+        <div class="label">Buying tier · same-day decision</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- JTBD CHART -->
+<section>
+  <h2 class="section">03 · JTBDs · Priority Matrix</h2>
+  <h3 class="section-title">Where the value concentrates</h3>
+  <p class="section-lede">Each JTBD plotted by severity (how badly it hurts), buyer power (can the persona say yes alone), and frequency (bubble size). The top-right quadrant is where to invest first.</p>
+
+  <div class="chart-frame">
+    <svg viewBox="0 0 760 440" style="width:100%; height:auto; display:block">
+      <!-- grid -->
+      <defs>
+        <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+          <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#f1f5f9" stroke-width="1"/>
+        </pattern>
+      </defs>
+      <rect x="80" y="20" width="660" height="360" fill="url(#grid)"/>
+      <!-- axes -->
+      <line x1="80" y1="380" x2="740" y2="380" stroke="#cbd5e1" stroke-width="1.5"/>
+      <line x1="80" y1="20" x2="80" y2="380" stroke="#cbd5e1" stroke-width="1.5"/>
+      <!-- mid lines -->
+      <line x1="410" y1="20" x2="410" y2="380" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="3 3"/>
+      <line x1="80" y1="200" x2="740" y2="200" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="3 3"/>
+      <!-- quadrant labels -->
+      <text x="245" y="38" text-anchor="middle" font-size="10" fill="#94a3b8" letter-spacing="1.5">LOW SEVERITY · HIGH BUYER POWER</text>
+      <text x="575" y="38" text-anchor="middle" font-size="10" fill="#059669" font-weight="700" letter-spacing="1.5">PRIORITY · BUILD FIRST</text>
+      <text x="245" y="410" text-anchor="middle" font-size="10" fill="#94a3b8" letter-spacing="1.5">LOW SEVERITY · LOW BUYER POWER</text>
+      <text x="575" y="410" text-anchor="middle" font-size="10" fill="#94a3b8" letter-spacing="1.5">HIGH SEVERITY · LOW BUYER POWER</text>
+      <!-- y axis labels -->
+      <text x="68" y="34" text-anchor="end" font-size="11" fill="#64748b">High</text>
+      <text x="68" y="204" text-anchor="end" font-size="11" fill="#64748b">Med</text>
+      <text x="68" y="378" text-anchor="end" font-size="11" fill="#64748b">Low</text>
+      <text x="40" y="200" text-anchor="middle" font-size="11" fill="#475569" font-weight="600" transform="rotate(-90 40 200)">Buyer power</text>
+      <!-- x axis labels -->
+      <text x="80" y="402" text-anchor="middle" font-size="11" fill="#64748b">Low</text>
+      <text x="410" y="402" text-anchor="middle" font-size="11" fill="#64748b">Med</text>
+      <text x="740" y="402" text-anchor="middle" font-size="11" fill="#64748b">High</text>
+      <text x="410" y="425" text-anchor="middle" font-size="11" fill="#475569" font-weight="600">Severity</text>
+
+      <!-- Bubbles: cx (x), cy, r -->
+      <!-- Marco JTBDs (amber #ea580c) -->
+      <!-- 1. Reconcile pressure class — Sev=5 BP=5 Freq=5 -->
+      <circle cx="700" cy="50" r="40" fill="#ea580c" fill-opacity=".22" stroke="#ea580c" stroke-width="2"/>
+      <text x="700" y="55" text-anchor="middle" font-size="11" font-weight="700" fill="#7c2d12">M1</text>
+      <!-- 2. Surface conflicts — Sev=5 BP=5 Freq=4 -->
+      <circle cx="650" cy="80" r="34" fill="#ea580c" fill-opacity=".22" stroke="#ea580c" stroke-width="2"/>
+      <text x="650" y="85" text-anchor="middle" font-size="11" font-weight="700" fill="#7c2d12">M2</text>
+      <!-- 3. Reasoning transparency — Sev=4 BP=5 Freq=5 -->
+      <circle cx="590" cy="60" r="40" fill="#ea580c" fill-opacity=".18" stroke="#ea580c" stroke-width="2"/>
+      <text x="590" y="65" text-anchor="middle" font-size="11" font-weight="700" fill="#7c2d12">M3</text>
+      <!-- 4. Stop padding — Sev=4 BP=5 Freq=4 -->
+      <circle cx="540" cy="95" r="30" fill="#ea580c" fill-opacity=".15" stroke="#ea580c" stroke-width="2"/>
+      <text x="540" y="100" text-anchor="middle" font-size="11" font-weight="700" fill="#7c2d12">M4</text>
+
+      <!-- Aisha JTBDs (green #059669) -->
+      <!-- A1. Attribute-level diff — Sev=4 BP=3 Freq=4 -->
+      <circle cx="525" cy="240" r="32" fill="#059669" fill-opacity=".22" stroke="#059669" stroke-width="2"/>
+      <text x="525" y="245" text-anchor="middle" font-size="11" font-weight="700" fill="#065f46">A1</text>
+      <!-- A2. ACC integration — Sev=5 BP=3 Freq=5 -->
+      <circle cx="660" cy="220" r="40" fill="#059669" fill-opacity=".22" stroke="#059669" stroke-width="2"/>
+      <text x="660" y="225" text-anchor="middle" font-size="11" font-weight="700" fill="#065f46">A2</text>
+
+      <!-- Dana JTBDs (blue #2563eb) -->
+      <!-- D1. Pre-issue conflict checker — Sev=3 BP=2 Freq=3 -->
+      <circle cx="380" cy="290" r="24" fill="#2563eb" fill-opacity=".18" stroke="#2563eb" stroke-width="2"/>
+      <text x="380" y="295" text-anchor="middle" font-size="11" font-weight="700" fill="#1e3a8a">D1</text>
+      <!-- D2. Defensible QC report — Sev=4 BP=2 Freq=2 -->
+      <circle cx="490" cy="320" r="20" fill="#2563eb" fill-opacity=".18" stroke="#2563eb" stroke-width="2"/>
+      <text x="490" y="325" text-anchor="middle" font-size="11" font-weight="700" fill="#1e3a8a">D2</text>
+
+      <!-- Ben JTBDs (slate #1e293b) -->
+      <!-- B1. Inventory from scans — Sev=5 BP=4 Freq=2 -->
+      <circle cx="685" cy="135" r="22" fill="#1e293b" fill-opacity=".22" stroke="#1e293b" stroke-width="2"/>
+      <text x="685" y="140" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">B1</text>
+      <!-- B2. Honest confidence flags — Sev=4 BP=4 Freq=2 -->
+      <circle cx="540" cy="155" r="20" fill="#1e293b" fill-opacity=".18" stroke="#1e293b" stroke-width="2"/>
+      <text x="540" y="160" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">B2</text>
+    </svg>
+
+    <div class="chart-legend">
+      <div class="legend-item"><span class="legend-dot" style="background:#ea580c"></span><strong style="margin-right:4px">Marco</strong> — fabricator JTBDs</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#059669"></span><strong style="margin-right:4px">Aisha</strong> — coordinator JTBDs</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#2563eb"></span><strong style="margin-right:4px">Dana</strong> — designer JTBDs</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#1e293b"></span><strong style="margin-right:4px">Ben</strong> — Cx JTBDs</div>
+      <div class="legend-item" style="margin-left:auto; color:var(--ink-3); font-size:11px">Bubble size = frequency · Position = severity (x) × buyer power (y)</div>
+    </div>
+
+    <div style="margin-top:18px; font-size:12px; color:var(--ink-2); display:grid; grid-template-columns:1fr 1fr; gap:6px 18px">
+      <div><strong style="color:#7c2d12">M1.</strong> Reconcile pressure class across drawing+spec+schedule</div>
+      <div><strong style="color:#065f46">A1.</strong> Attribute-level diff between drawing revisions</div>
+      <div><strong style="color:#7c2d12">M2.</strong> Surface spec-vs-drawing conflicts pre-RFI</div>
+      <div><strong style="color:#065f46">A2.</strong> ACC + Navisworks integration (gating)</div>
+      <div><strong style="color:#7c2d12">M3.</strong> Show reasoning behind any pressure-class tag</div>
+      <div><strong style="color:#1e3a8a">D1.</strong> Pre-issue QC checker on her own document set</div>
+      <div><strong style="color:#7c2d12">M4.</strong> Stop conservative gauge padding when ambiguous</div>
+      <div><strong style="color:#1e3a8a">D2.</strong> Defensible QC report for project file</div>
+      <div><strong style="color:#0f172a">B1.</strong> Structured inventory from scanned legacy PDFs</div>
+      <div><strong style="color:#0f172a">B2.</strong> Honest confidence flags ("read" / "inferred" / "unknown")</div>
+    </div>
+  </div>
+</section>
+
+<!-- PAIN HEATMAP -->
+<section>
+  <h2 class="section">04 · Pain Heatmap</h2>
+  <h3 class="section-title">Where each persona hurts</h3>
+  <p class="section-lede">Severity 1–5 across six pain categories. The hottest column is documentation drift — the universal frustration. Each persona has one or two acute lanes that are theirs alone.</p>
+
+  <div class="heatmap">
+    <div class="hd">Pain category</div>
+    <div class="hd" style="text-align:center; color:#2563eb">Dana</div>
+    <div class="hd" style="text-align:center; color:#ea580c">Marco</div>
+    <div class="hd" style="text-align:center; color:#059669">Aisha</div>
+    <div class="hd" style="text-align:center; color:#1e293b">Ben</div>
+
+    <div class="row-lab">Pressure-class ambiguity in deliverable</div>
+    <div class="cell" data-v="4">4</div>
+    <div class="cell" data-v="5">5</div>
+    <div class="cell" data-v="3">3</div>
+    <div class="cell" data-v="4">4</div>
+
+    <div class="row-lab">Spec ↔ schedule ↔ plan drift</div>
+    <div class="cell" data-v="4">4</div>
+    <div class="cell" data-v="5">5</div>
+    <div class="cell" data-v="4">4</div>
+    <div class="cell" data-v="3">3</div>
+
+    <div class="row-lab">Attribute drift across revisions</div>
+    <div class="cell" data-v="3">3</div>
+    <div class="cell" data-v="3">3</div>
+    <div class="cell" data-v="5">5</div>
+    <div class="cell" data-v="2">2</div>
+
+    <div class="row-lab">Scanned-PDF inventory rebuild</div>
+    <div class="cell" data-v="1">1</div>
+    <div class="cell" data-v="2">2</div>
+    <div class="cell" data-v="1">1</div>
+    <div class="cell" data-v="5">5</div>
+
+    <div class="row-lab">Tool / format integration gaps</div>
+    <div class="cell" data-v="4">4</div>
+    <div class="cell" data-v="3">3</div>
+    <div class="cell" data-v="5">5</div>
+    <div class="cell" data-v="4">4</div>
+
+    <div class="row-lab">Trust / transparency in tool output</div>
+    <div class="cell" data-v="4">4</div>
+    <div class="cell" data-v="5">5</div>
+    <div class="cell" data-v="4">4</div>
+    <div class="cell" data-v="5">5</div>
+  </div>
+
+  <div class="heatmap-legend">
+    <div>Severity</div>
+    <div class="scale">
+      <span style="background:#ffedd5"></span>
+      <span style="background:#fed7aa"></span>
+      <span style="background:#fb923c"></span>
+      <span style="background:#c2410c"></span>
+      <span style="background:#7c2d12"></span>
+    </div>
+    <div>1 (mild) → 5 (acute)</div>
+  </div>
+</section>
+
+<!-- WORKAROUNDS -->
+<section>
+  <h2 class="section">05 · Workarounds</h2>
+  <h3 class="section-title">What they do today, and how disruptable it is</h3>
+  <p class="section-lede">Bars sized by disruption potential — a high bar means a tool can directly displace this workaround. Adjacent means the workaround coexists with the new tool.</p>
+
+  <div class="chart-frame">
+    <div class="work-row">
+      <div>
+        <div class="w-name">Manual Excel duct inventory + sub typing in line items</div>
+        <div class="w-pers">Ben (margin-killer on retrocx)</div>
+      </div>
+      <div class="w-pers" style="text-align:right">Disruption →</div>
+      <div class="w-bar"><div class="w-fill w-very-high">Very High</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">Conservative gauge padding when pressure class ambiguous</div>
+        <div class="w-pers">Marco (silently erodes win-rate)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-high">High</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">Manual QC pass before drawing issuance</div>
+        <div class="w-pers">Dana (compressed on deadline weeks)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-high">High</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">Outsourced takeoff services for overflow</div>
+        <div class="w-pers">Marco (rework cost when wrong)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-high">High</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">Bluebeam Sets visual revision compare</div>
+        <div class="w-pers">Aisha, Marco, Ben (pixel-only, no attribute reasoning)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-medium">Medium · coexists</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">Navisworks property selection (manual element-by-element)</div>
+        <div class="w-pers">Aisha (doesn't scale)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-medium">Medium</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">TaksoAI for duct geometry only</div>
+        <div class="w-pers">Marco (extends, doesn't replace judgment)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-adjacent">Adjacent · extend</div></div>
+    </div>
+    <div class="work-row">
+      <div>
+        <div class="w-name">3D scan (Matterport / BLK360) when drawings unusable</div>
+        <div class="w-pers">Ben (different data — can't read pressure class)</div>
+      </div>
+      <div></div>
+      <div class="w-bar"><div class="w-fill w-adjacent">Adjacent · co-exist</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- BUYING AUTHORITY -->
+<section>
+  <h2 class="section">06 · Buying Authority</h2>
+  <h3 class="section-title">Where the deal actually closes</h3>
+  <p class="section-lede">Per-persona discretionary band, escalation threshold, and committee tier. Marco is highlighted as the ICP because both buyer and user concentrate in one role — every other persona splits.</p>
+
+  <div class="buying-grid">
+    <div class="buyer">
+      <div class="b-name">Dana — MEP designer</div>
+      <div class="b-role">Champion only · 12-18 mo cycle</div>
+      <div class="tier tier-disc"><span class="tier-dot"></span><span class="tier-amt">$0</span><span class="tier-who">discretionary</span></div>
+      <div class="tier tier-mid"><span class="tier-dot"></span><span class="tier-amt">$5–50K</span><span class="tier-who">practice leader + pilot</span></div>
+      <div class="tier tier-high"><span class="tier-dot"></span><span class="tier-amt">$50K+</span><span class="tier-who">CIO + procurement RFP</span></div>
+      <div class="verdict"><strong>Champion strength: Liability story to principals</strong>Not a buyer. Useful for sales narrative.</div>
+    </div>
+
+    <div class="buyer icp">
+      <div class="b-name">Marco — fabricator</div>
+      <div class="b-role">Buyer + user · ~1 wk cycle</div>
+      <div class="tier tier-disc"><span class="tier-dot"></span><span class="tier-amt">$200/seat/mo</span><span class="tier-who">Tuesday call</span></div>
+      <div class="tier tier-mid"><span class="tier-dot"></span><span class="tier-amt">$2K/mo · $20K/yr</span><span class="tier-who">+ owner Frank</span></div>
+      <div class="tier tier-high"><span class="tier-dot"></span><span class="tier-amt">$50K+/yr</span><span class="tier-who">2 reference customer calls</span></div>
+      <div class="verdict"><strong>ICP — primary persona for v1</strong>Both buyer and user. References > demos. Per-seat with cap, no pure usage pricing.</div>
+    </div>
+
+    <div class="buyer">
+      <div class="b-name">Aisha — BIM coordinator</div>
+      <div class="b-role">Champion · ~12 mo cycle · Q4 budget</div>
+      <div class="tier tier-disc"><span class="tier-dot"></span><span class="tier-amt">$500/mo per seat</span><span class="tier-who">project budget pilot</span></div>
+      <div class="tier tier-mid"><span class="tier-dot"></span><span class="tier-amt">$5K/mo · $50K/yr</span><span class="tier-who">VDC dir + VP Ops</span></div>
+      <div class="tier tier-high"><span class="tier-dot"></span><span class="tier-amt">IT review</span><span class="tier-who">SOC 2, ACC tenant auth — kills most pilots</span></div>
+      <div class="verdict"><strong>v2 enterprise persona</strong>ACC + Navisworks integration is the gate. Team-productivity pitch. Annual cycle.</div>
+    </div>
+
+    <div class="buyer">
+      <div class="b-name">Ben — Cx engineer</div>
+      <div class="b-role">Sole buyer + user · same-day decision</div>
+      <div class="tier tier-disc"><span class="tier-dot"></span><span class="tier-amt">$200/seat/mo</span><span class="tier-who">30-min demo trial</span></div>
+      <div class="tier tier-mid"><span class="tier-dot"></span><span class="tier-amt">$200–500/mo</span><span class="tier-who">paid pilot · cancel-from-settings</span></div>
+      <div class="tier tier-high"><span class="tier-dot"></span><span class="tier-amt">$5K+/yr</span><span class="tier-who">references from solo CxAs only</span></div>
+      <div class="verdict"><strong>Long-tail · v2 segment</strong>Real buyer, small TAM per account. Cash-flow framing.</div>
+    </div>
+  </div>
+</section>
+
+<!-- REVERSED ASSUMPTIONS -->
+<section>
+  <h2 class="section">07 · Reversed Assumptions</h2>
+  <h3 class="section-title">What we got wrong (and what to put in the PRD instead)</h3>
+  <p class="section-lede">The skeptic killed or partially killed ten claims that seemed load-bearing in the going-in hypothesis. These are the most valuable artifact of the round — they prevent the PRD from hardening around an untested belief.</p>
+
+  <div class="ra-grid">
+    <div class="ra fab">
+      <div class="ra-num">01</div>
+      <div class="was">Build a tool that <strong>predicts</strong> pressure class from drawing geometry.</div>
+      <div class="arrow">→</div>
+      <div class="now">Build a tool that <strong>reconciles</strong> pressure class across drawing + spec + schedule and shows reasoning.</div>
+      <div class="src">Source · <span class="pname">Marco</span> — "I do prediction in my head in two seconds. I want a tool that shows its work."</div>
+    </div>
+    <div class="ra fab">
+      <div class="ra-num">02</div>
+      <div class="was">Plan-view extraction is the technical core. Geometry is the moat.</div>
+      <div class="arrow">→</div>
+      <div class="now"><strong>Spec-PDF NLP</strong> (Section 23 31 13 reading) is the moat. Geometry-only plateaus at TaksoAI's level.</div>
+      <div class="src">Source · <span class="pname">Marco</span></div>
+    </div>
+    <div class="ra fab">
+      <div class="ra-num">03</div>
+      <div class="was">Catastrophic rework risk is the wedge. Sell as accuracy insurance.</div>
+      <div class="arrow">→</div>
+      <div class="now"><strong>Senior estimator hours per bid</strong> are the wedge. ~$30–45K/yr at a 50-person sub. ROI pitch is win-rate recovery.</div>
+      <div class="src">Source · <span class="pname">Marco</span></div>
+    </div>
+    <div class="ra fab">
+      <div class="ra-num">04</div>
+      <div class="was">Confidence flags will reduce verification effort.</div>
+      <div class="arrow">→</div>
+      <div class="now">Confidence flags <strong>redirect</strong> verification effort (triage). <strong>Reasoning transparency</strong> is what reduces it.</div>
+      <div class="src">Source · <span class="pname">Marco</span></div>
+    </div>
+    <div class="ra designer">
+      <div class="ra-num">05</div>
+      <div class="was">$3–6K/project response cost + $40–80K settlements justify the price.</div>
+      <div class="arrow">→</div>
+      <div class="now">Mostly sunk salary, settlement math is anecdotal. <strong>Don't anchor pricing to it</strong> without principal-level financial validation.</div>
+      <div class="src">Source · <span class="pname">Dana</span> via skeptic</div>
+    </div>
+    <div class="ra designer">
+      <div class="ra-num">06</div>
+      <div class="was">Stamp liability is a daily user-pull motivator.</div>
+      <div class="arrow">→</div>
+      <div class="now">Liability is a <strong>sales narrative for principals</strong>, not a user pull. Dana's lived with this for years without buying a mitigation.</div>
+      <div class="src">Source · <span class="pname">Dana</span> via skeptic</div>
+    </div>
+    <div class="ra coord">
+      <div class="ra-num">07</div>
+      <div class="was">Pressure class is THE attribute that drifts and matters.</div>
+      <div class="arrow">→</div>
+      <div class="now">Aisha's own example caught drift via <strong>sizing</strong>, not pressure class. Validate the attribute-priority ranking before scoping the diff scope.</div>
+      <div class="src">Source · <span class="pname">Aisha</span> via skeptic</div>
+    </div>
+    <div class="ra coord">
+      <div class="ra-num">08</div>
+      <div class="was">ACC integration is a checkbox on the GTM list.</div>
+      <div class="arrow">→</div>
+      <div class="now">ACC + Navisworks integration <strong>is</strong> the product for Aisha's segment. Underestimating it ships a standalone tool with a thin connector — exactly what she rejects.</div>
+      <div class="src">Source · <span class="pname">Aisha</span> via skeptic</div>
+    </div>
+    <div class="ra cx">
+      <div class="ra-num">09</div>
+      <div class="was">Per-project pricing fits because Cx usage is intermittent.</div>
+      <div class="arrow">→</div>
+      <div class="now">Ben's utilization (50% retrocx) isn't intermittent. Real preference is <strong>cash-flow matching</strong> — solvable with monthly cancel-anytime, not strictly per-project.</div>
+      <div class="src">Source · <span class="pname">Ben</span> via skeptic</div>
+    </div>
+    <div class="ra cx">
+      <div class="ra-num">10</div>
+      <div class="was">New-construction Cx is a weak segment for the product.</div>
+      <div class="arrow">→</div>
+      <div class="now">Ben underweights it because his PNW clients have above-average drawings. <strong>Installed-vs-design verification on FPT</strong> may make new-con a v2 segment. Probe 3–4 more new-con CxAs.</div>
+      <div class="src">Source · <span class="pname">Ben</span> via skeptic</div>
+    </div>
+  </div>
+</section>
+
+<!-- PRD IMPACT -->
+<section>
+  <h2 class="section">08 · Platform Impact</h2>
+  <h3 class="section-title">PRD sections that update</h3>
+  <p class="section-lede">Every change ties back to a specific persona finding in <code>demo/05-findings-*.md</code>. Six PRD sections require revisions before the v1 build is scoped.</p>
+
+  <div class="prd">
+    <div class="prd-row">
+      <div class="sec">§3 · PROBLEM STATEMENT</div>
+      <div class="from">Extract structured duct data from drawings.</div>
+      <div class="to">Reconcile pressure class across drawing + spec + schedule, surface conflicts, show reasoning.</div>
+    </div>
+    <div class="prd-row">
+      <div class="sec">§5 · GOALS</div>
+      <div class="from">Detection, extraction, classification.</div>
+      <div class="to">Add P0: ingest mechanical specifications PDF (§23 31 13). Reframe pressure-class classification as inference-with-citation, not prediction.</div>
+    </div>
+    <div class="prd-row">
+      <div class="sec">§6 · USER STORIES</div>
+      <div class="from">Eli (estimator) speed-of-takeoff stories.</div>
+      <div class="to">Add Marco-style reconciliation, Dana-style pre-issue QC, Aisha-style attribute-diff stories. Confidence flags as triage, not trust.</div>
+    </div>
+    <div class="prd-row">
+      <div class="sec">§7 · FUNCTIONAL REQS</div>
+      <div class="from">F-01 to F-07 (extract / annotate / classify).</div>
+      <div class="to">Add F-NEW: spec PDF ingestion. F-NEW: spec-vs-drawing-vs-schedule conflict detection. F-NEW: reasoning trace per pressure-class tag.</div>
+    </div>
+    <div class="prd-row">
+      <div class="sec">§9 · SUCCESS METRICS</div>
+      <div class="from">Detection recall, extraction accuracy, classification accuracy.</div>
+      <div class="to">Add: conflict-detection precision/recall, reasoning-trace completeness, time-to-first-tag-with-citation.</div>
+    </div>
+    <div class="prd-row">
+      <div class="sec">§11.2 · OPEN QUESTIONS</div>
+      <div class="from">Buyer persona: estimator / fabricator / BIM. Wedge: HVAC depth vs. drawing-extraction breadth.</div>
+      <div class="to"><strong>Resolved.</strong> Primary = Marco (mech sub estimating principal, 20–200 emp). Wedge = HVAC depth via spec+drawing reconciliation. Aisha = v2 enterprise partner via ACC integration.</div>
+    </div>
+  </div>
+</section>
+
+<!-- VALIDATION ROADMAP -->
+<section>
+  <h2 class="section">09 · What's Next</h2>
+  <h3 class="section-title">From synthetic hypotheses to real validation</h3>
+  <p class="section-lede">Synthetic findings are scaffolding. The most exposed claims (5 of them, listed in <code>findings-cross-persona.md</code> §7) need real interviews before they justify build commitments.</p>
+
+  <div class="timeline">
+    <div class="step done">
+      <div class="step-meta">May 2026 · Done</div>
+      <h6>Round 1 — Synthetic discovery</h6>
+      <p>4 personas, 24 questions, 4 skeptic passes, cross-persona synthesis. Wedge reframed from "predict" to "reconcile." 10 reversed assumptions.</p>
+    </div>
+    <div class="step next">
+      <div class="step-meta">Jun – Jul 2026 · Up next</div>
+      <h6>Round 2 — Live validation, Marco-segment</h6>
+      <p>5–8 interviews with mech sub estimating principals at 20–200-emp shops. Test: chronic-padding cost framing · reasoning-vs-accuracy preference · PlanSwift / Trimble / TaksoAI export priorities. Recruit through SMACNA chapter intros + MCAA + LinkedIn.</p>
+    </div>
+    <div class="step future">
+      <div class="step-meta">Aug 2026</div>
+      <h6>Round 3 — Solution validation, synthetic</h6>
+      <p>Re-load Marco persona with v1 prototype. "Walk me through using this on the next bid." Test conflict-detection UX, reasoning-trace UX, integration story. Repeat for Aisha when ACC connector is real.</p>
+    </div>
+    <div class="step future">
+      <div class="step-meta">Sep – Oct 2026</div>
+      <h6>Round 4 — Live solution validation</h6>
+      <p>Closed pilots with 2–3 Marco-equivalent shops. Measure: hours saved per bid, win-rate change on flagged-conflict bids, reasoning-trace audit acceptance. Establish minimum-viable accuracy bar for paid pilot.</p>
+    </div>
+    <div class="step future">
+      <div class="step-meta">Nov 2026 – Q1 2027</div>
+      <h6>Aisha-segment expansion</h6>
+      <p>ACC + Navisworks integration build. Pilot with 1–2 top-50 GCs in their Q4 software review window. Path to 2027 enterprise budget cycles.</p>
+    </div>
+  </div>
+</section>
+
+<!-- METHODOLOGY FOOTNOTE -->
+<section>
+  <h2 class="section">Methodology</h2>
+  <h3 class="section-title">How this report was made</h3>
+
+  <div class="method">
+    Four <strong>persona-embodied subagents</strong> were spawned with grounded role cards (SMACNA tables, ASHRAE chapters, real product names, firm sizes, buying authority). Each was interviewed with six aligned questions. Four <strong>independent skeptic subagents</strong> — which never saw the persona cards or the going-in hypothesis — pressure-tested the transcripts using five tests: substitutes / buyer-vs-user / frequency × severity / counterfactual / format-fit. The main agent synthesized findings into the cross-persona output that drives the headlines above.
+
+    <div class="schematic">
+      <span class="chip">Research plan</span>
+      <span class="arr">→</span>
+      <span class="chip">Persona card</span>
+      <span class="arr">→</span>
+      <span class="chip">Embodied subagent · interview</span>
+      <span class="arr">→</span>
+      <span class="chip">Skeptic subagent · pressure-test</span>
+      <span class="arr">→</span>
+      <span class="chip">Synthesis · main agent</span>
+    </div>
+    <div style="margin-top:14px">
+      The full skill, templates, persona library, and per-persona artifacts live at <code>/Techjay/synthetic-user-research/</code>. Reusable for solution-validation rounds — same persona files, new questions.
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div>HVAC Duct Detection · User Research Report · Round 1 · v0.1</div>
+  <div>Synthetic findings — validate before commit · Arjun · 2026-05-02</div>
+</footer>
+
+</div>
+</body>
+</html>

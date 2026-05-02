@@ -1,0 +1,40 @@
+# Dev stack: backend (FastAPI) + frontend (Vite).
+# Ollama runs on the host (per project decision 2026-05-02), reached via
+# host.docker.internal:11434. SOLUTION-DESIGN §3.1.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      VLM_PROVIDER: ${VLM_PROVIDER:-ollama}
+      OLLAMA_HOST_URL: ${OLLAMA_HOST_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2-vision}
+    extra_hosts:
+      # Linux needs this mapping; macOS/Windows resolve host.docker.internal natively.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/app:/app/app
+      - ./drawings:/drawings:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      # Host port 5180 to avoid colliding with other local Vite dev servers
+      # (5173–5177 are in use by other projects on this machine) — container
+      # still serves on its native 5173.
+      - "5180:5173"
+    environment:
+      # Vite proxy reads BACKEND_URL; inside the compose network the backend
+      # is reachable via its service name, not via host's localhost.
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+    depends_on:
+      - backend
