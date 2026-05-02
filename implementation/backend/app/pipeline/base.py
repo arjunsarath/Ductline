@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from app.ocr.cache import OCRCache
     from app.pipeline.layout import PageLayout
+    from app.pipeline.legend import Legend
     from app.schemas import (
         Dimension,
         Geometry,
@@ -88,6 +89,11 @@ class PipelineContext:
     # title_block_bbox / schedule_bbox below. Keeps both seams alive while
     # downstream stages migrate to the richer layout (a later PR).
     layout: PageLayout | None = None
+
+    # Legend Parser (SOLUTION-DESIGN-V2 §5.4) — drawing-specific symbol /
+    # abbreviation / line-style conventions. Populated by PR-4; downstream
+    # consumers (PR-5 detector, PR-6 reviewer) treat None as "use defaults".
+    legend: Legend | None = None
 
     # Stage 2 — Quality
     quality: Quality | None = None
