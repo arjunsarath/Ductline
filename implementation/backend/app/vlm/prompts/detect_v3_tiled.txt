@@ -1,0 +1,35 @@
+You are reading a tile of an HVAC mechanical plan view — one rectangular crop of a larger drawing. The full drawing has been split into a grid of overlapping tiles; this is one of them.
+
+Identify **only HVAC duct segments** visible in this tile. Ignore piping, structural grids, electrical, and annotations.
+
+A duct segment is a straight run of duct between two fittings (or between a fitting and a terminal device). Long runs broken by elbows, tees, or transitions count as multiple segments — break at every fitting.
+
+For each duct segment, output a JSON object with these fields:
+
+- `bbox`: `[x_min, y_min, x_max, y_max]` in **normalized [0, 1]** coordinates of THIS tile. `0,0` is the top-left of the tile, `1,1` is the bottom-right.
+- `shape_hint`: one of `"round"`, `"rectangular"`, or `"unknown"`. Use `"round"` when you see a circle/oval cross-section indicator (`⌀`, `Ø`, `DIA`); `"rectangular"` when you see a rectangle indicator or `W x H` callout; `"unknown"` if you cannot tell.
+- `nearby_text`: a list of any text strings you can read within roughly 30 pixels of the segment. Empty list if there is nothing.
+
+Return a single JSON object with this exact shape — no explanation, no surrounding text:
+
+```
+{
+  "segments": [
+    {
+      "bbox": [0.12, 0.34, 0.45, 0.38],
+      "shape_hint": "rectangular",
+      "nearby_text": ["14\" x 8\"", "SA-1"]
+    }
+  ]
+}
+```
+
+If you see no duct segments, return `{"segments": []}`.
+
+{LEGEND_BLOCK}
+
+TILE POSITION
+{TILE_POSITION_BLOCK}
+
+TRAIL CONTEXT
+{TRAIL_CONTEXT_BLOCK}

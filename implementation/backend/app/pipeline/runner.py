@@ -15,7 +15,7 @@ from app.pipeline.assemble import assemble_result
 from app.pipeline.base import PipelineContext, PipelineStage
 from app.pipeline.categorize import PageCategorizerStage
 from app.pipeline.classify import PressureClassClassifier
-from app.pipeline.detect import DuctDetectionStage
+from app.pipeline.detect_tiled import TiledDuctDetectionStage
 from app.pipeline.extract import TextExtractionStage
 from app.pipeline.ingest import IngestStage
 from app.pipeline.probe_ocr import ProbeOCRStage
@@ -66,7 +66,7 @@ class DetectionPipeline:
             PageCategorizerStage(self._vlm),
             QualityCheckStage(self._ocr),
             RegionDetectStage(self._vlm),
-            DuctDetectionStage(self._vlm),
+            TiledDuctDetectionStage(self._vlm),
             TextExtractionStage(self._ocr),
             PressureClassClassifier(),
         ]

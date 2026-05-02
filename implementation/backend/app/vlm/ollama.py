@@ -16,6 +16,7 @@ import base64
 import json
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from PIL.Image import Image
@@ -23,6 +24,9 @@ from pydantic import ValidationError
 
 from app.vlm.base import VLMClient, VLMError
 from app.vlm.tools import CategorizePageTool, DetectDuctsTool, DetectionResult, VLMSegment
+
+if TYPE_CHECKING:
+    from app.pipeline.legend import Legend
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _VLM_LONG_EDGE_PX = 1568  # llama3.2-vision native input edge
@@ -74,6 +78,35 @@ class OllamaVisionClient(VLMClient):
         }
         return self._post("/api/generate", payload).get("response", "").strip()
 
+    def detect_tile(
+        self,
+        crop: Image,
+        *,
+        tile_position: tuple[int, int, int, int],
+        trail_context: list[dict],
+        legend: Legend | None,
+    ) -> DetectionResult:
+        """Per-tile detect (SOLUTION-DESIGN-V2 §5.5, ADR-0008).
+
+        Reads the v3 tiled prompt, substitutes legend / tile-position / trail
+        blocks, and posts the tile crop to Ollama. Tiles are already sized to
+        the model's native window (~1100 px) so we bypass the v1 long-edge
+        downscale — re-downscaling here would discard the small-text gain
+        that motivates tiling in the first place.
+        """
+        prompt = _render_tile_prompt(tile_position, trail_context, legend)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(crop)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        raw_response = self._post("/api/generate", payload).get("response", "")
+        tool = _parse_tool_call(raw_response)
+        return DetectionResult(prompt_version="v3_tiled", segments=tool.segments)
+
     def categorize_region(self, crop: Image) -> CategorizePageTool:
         """Page Categorizer VLM fallback (SOLUTION-DESIGN-V2 §5.3).
 
@@ -123,6 +156,91 @@ def _load_prompt(version: str) -> str:
     if not path.exists():
         raise VLMError(f"prompt version not found: {version}")
     return path.read_text(encoding="utf-8")
+
+
+def _render_tile_prompt(
+    tile_position: tuple[int, int, int, int],
+    trail_context: list[dict],
+    legend: Legend | None,
+) -> str:
+    """Inject legend / tile-position / trail blocks into the v3 tile template.
+
+    The template lives in ``prompts/detect_v3_tiled.txt`` (not ``.md``) so the
+    legacy ``_load_prompt`` lookup never picks it up by accident — tile prompts
+    are templated, not version-pinned.
+    """
+    template_path = _PROMPTS_DIR / "detect_v3_tiled.txt"
+    if not template_path.exists():
+        raise VLMError("tile prompt template missing: detect_v3_tiled.txt")
+    template = template_path.read_text(encoding="utf-8")
+
+    legend_block = _format_legend_block(legend)
+    tile_position_block = (
+        f"(row {tile_position[0]}, col {tile_position[1]}) "
+        f"of ({tile_position[2]}, {tile_position[3]})"
+    )
+    trail_block = _format_trail_block(trail_context)
+
+    return (
+        template
+        .replace("{LEGEND_BLOCK}", legend_block)
+        .replace("{TILE_POSITION_BLOCK}", tile_position_block)
+        .replace("{TRAIL_CONTEXT_BLOCK}", trail_block)
+    )
+
+
+def _format_legend_block(legend: Legend | None) -> str:
+    """Return the LEGEND CONTEXT prompt block, or empty when no legend exists.
+
+    Empty (rather than a placeholder header) when legend is None — the trail
+    and tile-position blocks are still useful, but a header without a body
+    invites the model to fabricate legend entries.
+    """
+    if legend is None:
+        return ""
+    lines: list[str] = ["LEGEND CONTEXT (drawing-specific conventions)"]
+    if legend.line_styles:
+        lines.append("Line styles:")
+        for k, v in legend.line_styles.items():
+            lines.append(f"  {k} = {v}")
+    if legend.symbols:
+        lines.append("Symbols:")
+        for k, v in legend.symbols.items():
+            lines.append(f"  {k} = {v}")
+    if legend.abbreviations:
+        lines.append("Abbreviations:")
+        for k, v in legend.abbreviations.items():
+            lines.append(f"  {k} = {v}")
+    if legend.units != "unknown":
+        lines.append(f"Units: {legend.units}")
+    if len(lines) == 1:
+        # Header only — don't emit a bare header.
+        return ""
+    return "\n".join(lines)
+
+
+def _format_trail_block(trail_context: list[dict]) -> str:
+    """Render trail entries as bullet lines; explicit "do not re-detect" instruction.
+
+    Each entry carries a ``bbox_normalized`` already projected into the
+    CURRENT tile's coord space (caller's responsibility) and a
+    ``shape_hint``. We do not surface segment_ids — the model only needs to
+    know "this region was already taken" to avoid double-counting.
+    """
+    if not trail_context:
+        return "No segments have been detected yet."
+    lines = [
+        "The following segments were already detected in neighbouring tiles. "
+        "Do NOT re-detect them — they are listed in this tile's coord space "
+        "for reference only:"
+    ]
+    for entry in trail_context:
+        bbox = entry.get("bbox_normalized")
+        shape = entry.get("shape_hint", "unknown")
+        if bbox is None:
+            continue
+        lines.append(f"  - bbox={list(bbox)} shape={shape}")
+    return "\n".join(lines)
 
 
 def _downscale_for_vlm(image: Image, max_long_edge: int) -> tuple[Image, float]:

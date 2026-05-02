@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from PIL.Image import Image
 
+    from app.pipeline.legend import Legend
     from app.vlm.tools import CategorizePageTool, DetectionResult
 
 
@@ -25,3 +26,21 @@ class VLMClient(Protocol):
     def disambiguate_region(self, crop: Image, question: str) -> str: ...
 
     def categorize_region(self, crop: Image) -> CategorizePageTool: ...
+
+    def detect_tile(
+        self,
+        crop: Image,
+        *,
+        tile_position: tuple[int, int, int, int],
+        trail_context: list[dict],
+        legend: Legend | None,
+    ) -> DetectionResult:
+        """Per-tile detection (SOLUTION-DESIGN-V2 §5.5, ADR-0008).
+
+        ``tile_position`` is ``(row, col, total_rows, total_cols)`` (0-indexed
+        row/col). ``trail_context`` is a list of ``{bbox_normalized, shape_hint}``
+        dicts in the CURRENT tile's coord space — segments already detected in
+        tiles to the left in this row + tiles in previous rows. ``legend`` is
+        the parsed drawing legend (PR-4); None means "no legend context".
+        """
+        ...
