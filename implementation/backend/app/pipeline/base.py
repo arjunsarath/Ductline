@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from app.ocr.cache import OCRCache
+    from app.pipeline.layout import PageLayout
     from app.schemas import (
         Dimension,
         Geometry,
@@ -82,6 +83,11 @@ class PipelineContext:
 
     # Probe OCR (SOLUTION-DESIGN-V2 §5.2) — runs before quality in v2.
     ocr_cache: OCRCache | None = None
+
+    # Page Categorizer (SOLUTION-DESIGN-V2 §5.3) — populated alongside the v1
+    # title_block_bbox / schedule_bbox below. Keeps both seams alive while
+    # downstream stages migrate to the richer layout (a later PR).
+    layout: PageLayout | None = None
 
     # Stage 2 — Quality
     quality: Quality | None = None

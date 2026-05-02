@@ -22,11 +22,21 @@ from PIL.Image import Image
 from pydantic import ValidationError
 
 from app.vlm.base import VLMClient, VLMError
-from app.vlm.tools import DetectDuctsTool, DetectionResult, VLMSegment
+from app.vlm.tools import CategorizePageTool, DetectDuctsTool, DetectionResult, VLMSegment
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _VLM_LONG_EDGE_PX = 1568  # llama3.2-vision native input edge
 _OLLAMA_TIMEOUT_S = 120.0
+
+# Inline prompt — short enough that a separate prompt file would cost more in
+# indirection than it saves. Mirrors the categorizer rectangle taxonomy from
+# SOLUTION-DESIGN-V2 §5.3.
+_CATEGORIZE_PROMPT = (
+    "You are looking at one rectangular region of an HVAC mechanical drawing. "
+    "Classify the region as exactly one of: title_block, schedule, legend, notes, "
+    "plan_view, section_detail, unknown. Respond with JSON of the form "
+    '{"region_kind": "<one_of_the_kinds>"} and nothing else.'
+)
 
 
 class OllamaVisionClient(VLMClient):
@@ -63,6 +73,36 @@ class OllamaVisionClient(VLMClient):
             "options": {"temperature": 0.0},
         }
         return self._post("/api/generate", payload).get("response", "").strip()
+
+    def categorize_region(self, crop: Image) -> CategorizePageTool:
+        """Page Categorizer VLM fallback (SOLUTION-DESIGN-V2 §5.3).
+
+        Same JSON-mode posture as ``detect``: prompt for a tiny typed payload,
+        validate with Pydantic, surface schema failures as VLMError. The model
+        sees one rectangle of the drawing and must place it in one of seven
+        kinds — no prose, no confidence score.
+        """
+        payload = {
+            "model": self._model,
+            "prompt": _CATEGORIZE_PROMPT,
+            "images": [_encode_png_b64(crop)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM categorize_region")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM categorize JSON invalid: {exc}") from exc
+        try:
+            return CategorizePageTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM categorize JSON failed schema: {exc.error_count()} errors"
+            ) from exc
 
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self._host_url}{path}"

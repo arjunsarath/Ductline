@@ -42,3 +42,23 @@ class DetectionResult(BaseModel):
 
     prompt_version: str
     segments: list[VLMSegment]
+
+
+class CategorizePageTool(BaseModel):
+    """Page Categorizer fallback (SOLUTION-DESIGN-V2 §5.3, §6.3).
+
+    The algorithmic pass (Hough-line decomposition + OCR keyword match)
+    handles the common case. Rectangles it leaves as ``unknown`` are sent
+    to the VLM, which must classify them via this single typed field.
+    No continuous score, no prose — same posture as the other tools.
+    """
+
+    region_kind: Literal[
+        "title_block",
+        "schedule",
+        "legend",
+        "notes",
+        "plan_view",
+        "section_detail",
+        "unknown",
+    ]

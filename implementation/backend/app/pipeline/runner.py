@@ -13,6 +13,7 @@ from uuid import uuid4
 from app.ocr.base import OCRExtractor
 from app.pipeline.assemble import assemble_result
 from app.pipeline.base import PipelineContext, PipelineStage
+from app.pipeline.categorize import PageCategorizerStage
 from app.pipeline.classify import PressureClassClassifier
 from app.pipeline.detect import DuctDetectionStage
 from app.pipeline.extract import TextExtractionStage
@@ -62,6 +63,7 @@ class DetectionPipeline:
         # refactors land in later v2 PRs.
         return [
             ProbeOCRStage(self._ocr),
+            PageCategorizerStage(self._vlm),
             QualityCheckStage(self._ocr),
             RegionDetectStage(self._vlm),
             DuctDetectionStage(self._vlm),

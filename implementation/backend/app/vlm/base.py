@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from PIL.Image import Image
 
-    from app.vlm.tools import DetectionResult
+    from app.vlm.tools import CategorizePageTool, DetectionResult
 
 
 class VLMError(Exception):
@@ -23,3 +23,5 @@ class VLMClient(Protocol):
     def detect(self, image: Image, *, prompt_version: str = "v1") -> DetectionResult: ...
 
     def disambiguate_region(self, crop: Image, question: str) -> str: ...
+
+    def categorize_region(self, crop: Image) -> CategorizePageTool: ...
