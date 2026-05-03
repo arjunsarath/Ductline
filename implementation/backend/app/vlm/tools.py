@@ -77,6 +77,12 @@ class PageRegionsTool(BaseModel):
     informative than a hallucinated one. Per-region positional accuracy of
     5-10% is tolerable; downstream stages (tiled detect) re-tile around the
     plan-view rect and don't need pixel-perfect inputs.
+
+    Retained for backward compatibility — the categorizer's VLM-first path
+    no longer calls ``detect_page_regions`` (it now uses two focused calls,
+    ``detect_plan_view`` and ``detect_legend``, see ``PlanViewTool`` /
+    ``LegendRegionTool``). Implementations may keep the method as a thin
+    wrapper for callers that still rely on the combined schema.
     """
 
     plan_view: tuple[float, float, float, float] | None = None
@@ -88,6 +94,35 @@ class PageRegionsTool(BaseModel):
     schedule: tuple[float, float, float, float] | None = None
     title_block: tuple[float, float, float, float] | None = None
     notes: list[tuple[float, float, float, float]] = Field(default_factory=list)
+
+
+class PlanViewTool(BaseModel):
+    """Focused VLM wire format for plan-view detection (SOLUTION-DESIGN-V2 §5.3).
+
+    Output of ``VLMClient.detect_plan_view`` — one normalized [0, 1] bbox
+    in the page's coord space, or ``None`` when the model can't see a plan
+    view at all. Single-question schema (no notes, no legend, no
+    disambiguation) keeps small VLMs like llama3.2-vision in their sweet
+    spot; the categorizer pads + scales the bbox to ``RectPt`` and runs
+    the same plausibility guard as the previous combined schema.
+    """
+
+    bbox: tuple[float, float, float, float] | None = None
+
+
+class LegendRegionTool(BaseModel):
+    """Focused VLM wire format for legend detection (SOLUTION-DESIGN-V2 §5.3).
+
+    Output of ``VLMClient.detect_legend`` — zero or more normalized [0, 1]
+    bboxes in the page's coord space. The list shape preserves the
+    multi-block split case (symbols box + abbreviation table on opposite
+    sides of the sheet); the categorizer unions them into a single rect
+    via the existing ``_bounding_rect`` helper. An empty list means "no
+    legend on this drawing", which is non-failure — many sheets ship
+    without one.
+    """
+
+    bboxes: list[tuple[float, float, float, float]] = Field(default_factory=list)
 
 
 class ReviewSegmentTool(BaseModel):

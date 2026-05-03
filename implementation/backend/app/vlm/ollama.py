@@ -31,7 +31,9 @@ from app.vlm.tools import (
     CategorizePageTool,
     DetectDuctsTool,
     DetectionResult,
+    LegendRegionTool,
     PageRegionsTool,
+    PlanViewTool,
     RefineSegmentTool,
     ReviewSegmentTool,
     VLMSegment,
@@ -238,6 +240,98 @@ class OllamaVisionClient(VLMClient):
             tool.schedule is not None,
             tool.title_block is not None,
             len(tool.notes),
+            time.monotonic() - t0,
+        )
+        return tool
+
+    def detect_plan_view(self, image: Image) -> PlanViewTool:
+        """Focused plan-view detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Single-question prompt asking only for the plan-view bbox. Same
+        JSON-mode + Pydantic-validate posture as ``categorize_region``;
+        schema failures surface as VLMError so the calling stage can fall
+        back to the heuristic path. Replaces the multi-region call from
+        the VLM-first path because small VLMs handle one focused
+        question better than five disambiguated ones.
+        """
+        prompt = _load_model_specific_prompt("detect_plan_view.txt", self._model)
+
+        downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(downscaled)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_plan_view: start image=%dx%d",
+            downscaled.width,
+            downscaled.height,
+        )
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM detect_plan_view")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM plan_view JSON invalid: {exc}") from exc
+        try:
+            tool = PlanViewTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM plan_view JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+        logger.info(
+            "vlm.detect_plan_view: done bbox=%s elapsed=%.2fs",
+            tool.bbox,
+            time.monotonic() - t0,
+        )
+        return tool
+
+    def detect_legend(self, image: Image) -> LegendRegionTool:
+        """Focused legend detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same posture as ``detect_plan_view`` but allows multiple bboxes —
+        legends are commonly split into symbol box + abbreviation table.
+        The calling stage unions them. An empty list is the "no legend
+        on this drawing" outcome and is non-failure.
+        """
+        prompt = _load_model_specific_prompt("detect_legend.txt", self._model)
+
+        downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(downscaled)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_legend: start image=%dx%d",
+            downscaled.width,
+            downscaled.height,
+        )
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM detect_legend")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM legend JSON invalid: {exc}") from exc
+        try:
+            tool = LegendRegionTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM legend JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+        logger.info(
+            "vlm.detect_legend: done bboxes=%d elapsed=%.2fs",
+            len(tool.bboxes),
             time.monotonic() - t0,
         )
         return tool

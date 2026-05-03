@@ -34,7 +34,12 @@ from app.pipeline.categorize import (
 )
 from app.source.base import DrawingSource
 from app.vlm.base import VLMError
-from app.vlm.tools import CategorizePageTool, DetectionResult, PageRegionsTool
+from app.vlm.tools import (
+    CategorizePageTool,
+    DetectionResult,
+    LegendRegionTool,
+    PlanViewTool,
+)
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -42,14 +47,16 @@ from app.vlm.tools import CategorizePageTool, DetectionResult, PageRegionsTool
 class _StubVLM:
     """VLMClient stub — categorize_region returns a preset value or raises.
 
-    ``detect_page_regions`` is also stubbed: by default it returns a tool
-    with ``plan_view=None``, which the categorizer treats as "VLM didn't
-    localise a plan view" and falls through to the heuristic. Tests that
-    want to exercise the VLM-first happy path pass ``page_regions_result``
-    or ``raise_on_page_regions``.
+    ``detect_plan_view`` and ``detect_legend`` are also stubbed. By default
+    both return empty results (no bbox / empty list), which the categorizer
+    treats as "VLM didn't localise a plan view" → falls through to the
+    heuristic. Tests that want to exercise the VLM-first happy path pass
+    explicit ``plan_view_result`` / ``legend_result`` arguments, or one of
+    the ``raise_on_*`` flags to simulate a VLM error.
 
-    detect / disambiguate_region exist only to satisfy the Protocol; tests
-    here never call them.
+    detect / disambiguate_region / detect_page_regions exist only to
+    satisfy the Protocol; tests here don't exercise them on the VLM-first
+    path (which now uses two focused calls instead of the combined one).
     """
 
     def __init__(
@@ -57,15 +64,20 @@ class _StubVLM:
         *,
         categorize_kind: str = "unknown",
         raise_on_categorize: bool = False,
-        page_regions_result: PageRegionsTool | None = None,
-        raise_on_page_regions: bool = False,
+        plan_view_result: PlanViewTool | None = None,
+        raise_on_plan_view: bool = False,
+        legend_result: LegendRegionTool | None = None,
+        raise_on_legend: bool = False,
     ) -> None:
         self._kind = categorize_kind
         self._raise = raise_on_categorize
-        self._page_regions_result = page_regions_result
-        self._raise_on_page_regions = raise_on_page_regions
+        self._plan_view_result = plan_view_result
+        self._raise_on_plan_view = raise_on_plan_view
+        self._legend_result = legend_result
+        self._raise_on_legend = raise_on_legend
         self.call_count = 0
-        self.page_regions_call_count = 0
+        self.plan_view_call_count = 0
+        self.legend_call_count = 0
         self.heuristic_invoked = False
 
     def detect(self, image: Image.Image, *, prompt_version: str = "v1") -> DetectionResult:
@@ -83,15 +95,25 @@ class _StubVLM:
             raise RuntimeError("vlm offline")
         return CategorizePageTool(region_kind=self._kind)  # type: ignore[arg-type]
 
-    def detect_page_regions(self, image: Image.Image) -> PageRegionsTool:
+    def detect_plan_view(self, image: Image.Image) -> PlanViewTool:
         del image
-        self.page_regions_call_count += 1
-        if self._raise_on_page_regions:
-            raise VLMError("stub: detect_page_regions raised")
-        if self._page_regions_result is not None:
-            return self._page_regions_result
+        self.plan_view_call_count += 1
+        if self._raise_on_plan_view:
+            raise VLMError("stub: detect_plan_view raised")
+        if self._plan_view_result is not None:
+            return self._plan_view_result
         # Default — no plan view → categorizer falls back to the heuristic.
-        return PageRegionsTool()
+        return PlanViewTool()
+
+    def detect_legend(self, image: Image.Image) -> LegendRegionTool:
+        del image
+        self.legend_call_count += 1
+        if self._raise_on_legend:
+            raise VLMError("stub: detect_legend raised")
+        if self._legend_result is not None:
+            return self._legend_result
+        # Default — no legend on this drawing.
+        return LegendRegionTool()
 
 
 # ── Fixture builders ─────────────────────────────────────────────────────────
@@ -611,10 +633,14 @@ def test_plan_view_largest_when_side_by_side() -> None:
 
 
 def test_vlm_first_populates_layout_when_returns_valid() -> None:
-    """Stub returns a sensible PageRegionsTool → layout matches; heuristic
-    is NOT consulted. The OCR cache is intentionally empty (which would
-    force the heuristic to fall back to whole-page) so we can prove the
-    VLM-first path bypassed the heuristic entirely.
+    """Stub returns a sensible plan_view + legend pair → layout matches;
+    heuristic is NOT consulted. The OCR cache is intentionally empty
+    (which would force the heuristic to fall back to whole-page) so we
+    can prove the VLM-first path bypassed the heuristic entirely.
+
+    title_block / schedule / notes are NOT populated by the VLM-first
+    path in v2 — they're cosmetic and the focused-call refactor drops
+    them. The heuristic still surfaces them when it runs.
     """
     img = _blank_image(800, 600)
     src = _raster_source(img)
@@ -622,15 +648,8 @@ def test_vlm_first_populates_layout_when_returns_valid() -> None:
     # page plan_view. The VLM-first result must override that.
     ctx = _ctx_with(src, _ocr_cache([]))
     vlm = _StubVLM(
-        page_regions_result=PageRegionsTool(
-            plan_view=(0.05, 0.05, 0.70, 0.95),
-            # legend is now a list — the model may return one or more
-            # blocks (symbol box + abbreviation table commonly split).
-            legend=[(0.72, 0.05, 0.98, 0.40)],
-            schedule=(0.72, 0.42, 0.98, 0.70),
-            title_block=(0.72, 0.85, 0.98, 0.98),
-            notes=[(0.72, 0.72, 0.98, 0.84)],
-        )
+        plan_view_result=PlanViewTool(bbox=(0.05, 0.05, 0.70, 0.95)),
+        legend_result=LegendRegionTool(bboxes=[(0.72, 0.05, 0.98, 0.40)]),
     )
 
     PageCategorizerStage(vlm).run(ctx)
@@ -644,17 +663,25 @@ def test_vlm_first_populates_layout_when_returns_valid() -> None:
     # legend (0.72, 0.05, 0.98, 0.40) → padded (0.69, 0.02, 1.0, 0.43)
     # (right edge clamped at 1.0) → scaled (552, 12, 800, 258).
     assert ctx.layout.legend == pytest.approx((552.0, 12.0, 800.0, 258.0))
-    assert ctx.layout.schedule is not None
-    assert ctx.layout.title_block is not None
-    assert len(ctx.layout.notes) == 1
+    # title_block / schedule / notes intentionally None / [] on the
+    # VLM-first path.
+    assert ctx.layout.schedule is None
+    assert ctx.layout.title_block is None
+    assert ctx.layout.notes == []
     # The VLM-first path bypasses the heuristic entirely: the no-OCR-matches
     # whole-page fallback warning would have fired had the heuristic run.
     assert not any("categorizer_failed" in e for e in ctx.errors)
-    assert vlm.page_regions_call_count == 1
+    assert vlm.plan_view_call_count == 1
+    assert vlm.legend_call_count == 1
 
 
 def test_vlm_first_falls_back_on_no_plan_view() -> None:
-    """Stub returns plan_view=None → fall through to heuristic."""
+    """Stub returns plan_view bbox=None → fall through to heuristic.
+
+    Legend call is NOT made when plan_view is missing — the categorizer
+    short-circuits to avoid wasting a call on a drawing we can't even
+    localise the plan view on.
+    """
     img = _vertical_split_image(800, 600)
     src = _raster_source(img)
     matches = [
@@ -662,7 +689,7 @@ def test_vlm_first_falls_back_on_no_plan_view() -> None:
         _match("PROJECT NAME: ACME", x=420, y=460),
     ]
     ctx = _ctx_with(src, _ocr_cache(matches))
-    # Default stub: plan_view=None → heuristic runs.
+    # Default stub: plan_view bbox=None → heuristic runs, legend never queried.
     vlm = _StubVLM()
 
     PageCategorizerStage(vlm).run(ctx)
@@ -673,11 +700,17 @@ def test_vlm_first_falls_back_on_no_plan_view() -> None:
     px0, py0, px1, py1 = ctx.layout.plan_view
     assert px0 <= 100 < px1
     assert py0 <= 100 < py1
-    assert vlm.page_regions_call_count == 1
+    assert vlm.plan_view_call_count == 1
+    assert vlm.legend_call_count == 0  # short-circuited
 
 
 def test_vlm_first_falls_back_on_implausible_layout() -> None:
-    """Stub returns plan_view = whole-page bbox → guard rejects → heuristic."""
+    """Stub returns plan_view = whole-page bbox → guard rejects → heuristic.
+
+    Legend call is short-circuited when the plan_view fails the guard —
+    same reasoning as the no-plan-view path: don't burn a focused call
+    on a drawing where the cheaper plan_view check already failed.
+    """
     img = _vertical_split_image(800, 600)
     src = _raster_source(img)
     matches = [
@@ -686,10 +719,8 @@ def test_vlm_first_falls_back_on_implausible_layout() -> None:
     ]
     ctx = _ctx_with(src, _ocr_cache(matches))
     vlm = _StubVLM(
-        page_regions_result=PageRegionsTool(
-            # Plan view is essentially the whole page — guard rejects.
-            plan_view=(0.0, 0.0, 1.0, 1.0),
-        )
+        # Plan view is essentially the whole page — guard rejects.
+        plan_view_result=PlanViewTool(bbox=(0.0, 0.0, 1.0, 1.0)),
     )
 
     PageCategorizerStage(vlm).run(ctx)
@@ -701,10 +732,11 @@ def test_vlm_first_falls_back_on_implausible_layout() -> None:
     # half (~0–400).
     assert px1 < 600  # not the whole page
     assert px0 <= 100 < px1
+    assert vlm.legend_call_count == 0  # short-circuited
 
 
 def test_vlm_first_falls_back_on_vlm_error() -> None:
-    """Stub raises VLMError → heuristic runs unchanged."""
+    """Stub raises VLMError on plan_view → heuristic runs unchanged."""
     img = _vertical_split_image(800, 600)
     src = _raster_source(img)
     matches = [
@@ -712,7 +744,7 @@ def test_vlm_first_falls_back_on_vlm_error() -> None:
         _match("PROJECT NAME: ACME", x=420, y=460),
     ]
     ctx = _ctx_with(src, _ocr_cache(matches))
-    vlm = _StubVLM(raise_on_page_regions=True)
+    vlm = _StubVLM(raise_on_plan_view=True)
 
     PageCategorizerStage(vlm).run(ctx)
 
@@ -721,7 +753,9 @@ def test_vlm_first_falls_back_on_vlm_error() -> None:
     px0, py0, px1, py1 = ctx.layout.plan_view
     assert px0 <= 100 < px1
     assert py0 <= 100 < py1
-    assert vlm.page_regions_call_count == 1
+    assert vlm.plan_view_call_count == 1
+    # Legend call must not run when plan_view itself errored.
+    assert vlm.legend_call_count == 0
 
 
 def test_vlm_first_scales_normalized_bboxes_correctly() -> None:
@@ -735,9 +769,7 @@ def test_vlm_first_scales_normalized_bboxes_correctly() -> None:
     src = _raster_source(img)
     ctx = _ctx_with(src, _ocr_cache([]))
     vlm = _StubVLM(
-        page_regions_result=PageRegionsTool(
-            plan_view=(0.1, 0.1, 0.9, 0.9),
-        )
+        plan_view_result=PlanViewTool(bbox=(0.1, 0.1, 0.9, 0.9)),
     )
 
     PageCategorizerStage(vlm).run(ctx)
@@ -757,13 +789,13 @@ def test_vlm_first_unions_multi_block_legend() -> None:
     src = _raster_source(img)
     ctx = _ctx_with(src, _ocr_cache([]))
     vlm = _StubVLM(
-        page_regions_result=PageRegionsTool(
-            plan_view=(0.05, 0.05, 0.65, 0.95),
-            legend=[
+        plan_view_result=PlanViewTool(bbox=(0.05, 0.05, 0.65, 0.95)),
+        legend_result=LegendRegionTool(
+            bboxes=[
                 (0.70, 0.10, 0.95, 0.40),  # upper symbol box
                 (0.70, 0.55, 0.95, 0.85),  # lower abbreviation table
             ],
-        )
+        ),
     )
 
     PageCategorizerStage(vlm).run(ctx)
@@ -774,3 +806,35 @@ def test_vlm_first_unions_multi_block_legend() -> None:
     # Bounding rect: (0.67, 0.07, 0.98, 0.88) → scaled to 800×600:
     # (536, 42, 784, 528).
     assert ctx.layout.legend == pytest.approx((536.0, 42.0, 784.0, 528.0))
+
+
+def test_vlm_first_legend_failure_doesnt_block_plan_view() -> None:
+    """plan_view succeeds; legend call raises VLMError.
+
+    A successful plan_view localisation must NOT be discarded because the
+    independent legend call failed. Layout.plan_view should be populated
+    from the VLM, layout.legend stays None, and the heuristic must NOT
+    be invoked (the OCR cache is empty so a heuristic invocation would
+    fire ``categorizer_failed`` warnings — we assert their absence).
+    """
+    img = _blank_image(800, 600)
+    src = _raster_source(img)
+    ctx = _ctx_with(src, _ocr_cache([]))
+    vlm = _StubVLM(
+        plan_view_result=PlanViewTool(bbox=(0.1, 0.1, 0.9, 0.9)),
+        raise_on_legend=True,
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Plan view came through — same expected scaling as
+    # test_vlm_first_scales_normalized_bboxes_correctly.
+    assert ctx.layout.plan_view == pytest.approx((56.0, 42.0, 744.0, 558.0))
+    assert ctx.layout.legend is None
+    # Both calls were attempted; only legend failed.
+    assert vlm.plan_view_call_count == 1
+    assert vlm.legend_call_count == 1
+    # Heuristic was NOT invoked — the empty-OCR-cache fallback warning
+    # would have appeared had the heuristic run.
+    assert not any("categorizer_failed" in e for e in ctx.errors)

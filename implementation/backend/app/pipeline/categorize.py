@@ -2,10 +2,14 @@
 
 Decomposes the drawing into named regions (title block, schedule, legend,
 notes, plan view) so downstream tiled detect (§5.5) only runs on plan-view
-geometry. VLM-first: a single whole-page ``detect_page_regions`` call
-returns rough region bboxes. The Hough-line + keyword heuristic stays as a
-fallback, used only when the VLM call errors or its output fails the soft
-plausibility guard.
+geometry. VLM-first: two focused single-region calls — ``detect_plan_view``
+first, then ``detect_legend`` — return rough region bboxes. Each prompt is
+30-50 tokens with a single question and schema, which is in llama3.2-vision's
+sweet spot. The Hough-line + keyword heuristic stays as a fallback, used
+only when the plan_view call errors or its output fails the soft plausibility
+guard. ``title_block``, ``schedule`` and ``notes`` are intentionally dropped
+from the VLM-first path (cosmetic in v2 — no downstream stage consumes them
+in a load-bearing way); the heuristic still populates them on best-effort.
 
 Locked decisions (SOLUTION-DESIGN-V2 §5.3, §7):
 
@@ -176,28 +180,24 @@ class PageCategorizerStage(PipelineStage):
     # ── VLM-first layout build (primary path) ───────────────────────────────
 
     def _build_layout_via_vlm(self, ctx: PipelineContext) -> PageLayout | None:
-        """Single whole-page VLM call → PageLayout, or None on no-go.
+        """Two focused VLM calls → PageLayout, or None on no-go.
 
-        Returns None (rather than raising) when the model legitimately
-        couldn't see a plan view or the bboxes failed the plausibility
-        guard. ``VLMError`` is allowed to bubble — the caller treats it the
-        same as None but logs at warning level.
+        Step 1: ``detect_plan_view``. Returns None when bbox is missing or
+        fails the plausibility guard (sub-1% / super-99% / page-bounds).
+        Step 2 is short-circuited in that case — the legend call only runs
+        when we already have a usable plan view.
+
+        Step 2: ``detect_legend``. Failure is non-fatal: a legend-call
+        VLMError is logged and ignored, leaving ``layout.legend = None``.
+        ``title_block``, ``schedule`` and ``notes`` are intentionally not
+        populated by this path — they're cosmetic in v2 and the heuristic
+        path still picks them up on best-effort fallback.
+
+        ``VLMError`` from the plan_view call is allowed to bubble — the
+        caller (``run``) treats it the same as None but logs at warning
+        level.
         """
         assert ctx.source is not None, "ingest must run before page_categorize"
-
-        tool = self._vlm.detect_page_regions(ctx.source.raster_probe)
-
-        if tool.plan_view is None:
-            logger.info(
-                "page_categorize: VLM returned no plan_view; falling back"
-            )
-            return None
-
-        if not _is_vlm_layout_plausible(tool):
-            logger.info(
-                "page_categorize: VLM layout failed plausibility guard; falling back"
-            )
-            return None
 
         page_w, page_h = _page_dimensions(ctx.source)
 
@@ -211,22 +211,56 @@ class PageCategorizerStage(PipelineStage):
             padded = _pad_normalized_bbox(bbox, _VLM_BBOX_PAD_RATIO)
             return _scale_normalized_to_source(padded, page_w, page_h)
 
-        plan_view = _project(tool.plan_view)
-        # Multi-block legend: the VLM may return one entry (single legend
-        # box) or two (symbols + abbreviations split). PageLayout.legend is
-        # a single rect — compute the bounding rect of all returned blocks
-        # so downstream consumers (LegendParserStage) work on a contiguous
-        # area. Padding is applied to each input block before union.
-        legend = _bounding_rect([_project(b) for b in tool.legend]) if tool.legend else None
-        schedule = _project(tool.schedule) if tool.schedule is not None else None
-        title_block = _project(tool.title_block) if tool.title_block is not None else None
-        notes = [_project(n) for n in tool.notes]
+        # Step 1 — plan view. The categorizer's contract: no plan view ⇒
+        # no VLM-first layout. Don't waste a legend call on a drawing we
+        # can't even localise the plan view on.
+        plan_view_tool = self._vlm.detect_plan_view(ctx.source.raster_probe)
+        if plan_view_tool.bbox is None:
+            logger.info(
+                "page_categorize: vlm-first: plan_view=None; falling back to heuristic"
+            )
+            return None
+
+        if not _is_plan_view_bbox_plausible(plan_view_tool.bbox):
+            logger.info(
+                "page_categorize: vlm-first: failing back to heuristic "
+                "(plan_view failed plausibility guard: %s)",
+                plan_view_tool.bbox,
+            )
+            return None
+
+        plan_view = _project(plan_view_tool.bbox)
+        logger.info("page_categorize: vlm-first: plan_view=%s", plan_view_tool.bbox)
+
+        # Step 2 — legend. Independent VLMError handling: a legend failure
+        # shouldn't waste the successful plan_view call. Empty bboxes is a
+        # legitimate "no legend on this drawing" answer, NOT a failure.
+        legend: RectPt | None = None
+        try:
+            legend_tool = self._vlm.detect_legend(ctx.source.raster_probe)
+        except VLMError as exc:
+            logger.warning(
+                "page_categorize: vlm-first: legend call failed (%s); "
+                "keeping plan_view, legend=None",
+                exc,
+            )
+        else:
+            if legend_tool.bboxes:
+                legend = _bounding_rect([_project(b) for b in legend_tool.bboxes])
+            logger.info(
+                "page_categorize: vlm-first: legend=%s",
+                legend if legend is not None else "none",
+            )
+
+        # title_block / schedule / notes intentionally None / [] on the
+        # VLM-first path (see module docstring). Heuristic populates them
+        # on best-effort when it runs.
         return PageLayout(
             plan_view=plan_view,
             legend=legend,
-            schedule=schedule,
-            title_block=title_block,
-            notes=notes,
+            schedule=None,
+            title_block=None,
+            notes=[],
         )
 
     # ── Heuristic layout build (fallback) ───────────────────────────────────
@@ -389,23 +423,22 @@ def _normalized_bbox_area(bbox: tuple[float, float, float, float]) -> float:
     return max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
 
 
-def _is_vlm_layout_plausible(tool: object) -> bool:
-    """Soft sanity check on a ``PageRegionsTool`` — see SOLUTION-DESIGN-V2 §5.3.
+def _is_plan_view_bbox_plausible(
+    bbox: tuple[float, float, float, float],
+) -> bool:
+    """Soft sanity check on the focused plan-view bbox — SOLUTION-DESIGN-V2 §5.3.
 
-    Reject layouts whose plan_view is missing, sub-1% / super-99% in area,
-    or essentially the whole page (within 5% slop on every edge). Any of
-    those signals "the model didn't actually localise a plan view" and
-    we should fall back to the heuristic. Other regions (legend, schedule,
-    notes, title_block) are filtered individually rather than failing the
-    whole layout — they're optional.
+    Reject bboxes that are sub-1% / super-99% in area or essentially the
+    whole page (within 5% slop on every edge). Any of those signals "the
+    model didn't actually localise a plan view" and we should fall back
+    to the heuristic. The categorizer no longer evaluates legend/schedule/
+    notes/title_block on the VLM-first path, so this guard is plan-view-
+    only — legend bboxes are accepted as-is from the focused legend call.
     """
-    plan_view = getattr(tool, "plan_view", None)
-    if plan_view is None:
-        return False
-    area = _normalized_bbox_area(plan_view)
+    area = _normalized_bbox_area(bbox)
     if area < _VLM_REGION_MIN_AREA or area > _VLM_REGION_MAX_AREA:
         return False
-    x0, y0, x1, y1 = plan_view
+    x0, y0, x1, y1 = bbox
     tol = _VLM_PLAN_VIEW_PAGE_BOUNDS_TOL
     if x0 <= tol and y0 <= tol and x1 >= 1.0 - tol and y1 >= 1.0 - tol:
         # Plan view is essentially the page — degenerate, fall back.

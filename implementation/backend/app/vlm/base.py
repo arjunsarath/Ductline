@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from app.vlm.tools import (
         CategorizePageTool,
         DetectionResult,
+        LegendRegionTool,
         PageRegionsTool,
+        PlanViewTool,
         RefineSegmentTool,
     )
 
@@ -34,13 +36,39 @@ class VLMClient(Protocol):
     def categorize_region(self, crop: Image) -> CategorizePageTool: ...
 
     def detect_page_regions(self, image: Image) -> PageRegionsTool:
-        """VLM-first page categorization (SOLUTION-DESIGN-V2 §5.3).
+        """Combined-call page categorization (SOLUTION-DESIGN-V2 §5.3).
+
+        Retained for backward compatibility — the categorizer's VLM-first
+        path no longer calls this method. It now uses two focused calls
+        (``detect_plan_view``, ``detect_legend``) because manual testing
+        showed that asking small VLMs to disambiguate across five region
+        types in one call produces consistent failures (over-segmenting
+        tables, swapping legend↔notes, clipping plan_view at title
+        banners). Implementations may keep this method for callers that
+        still rely on the combined schema.
+        """
+        ...
+
+    def detect_plan_view(self, image: Image) -> PlanViewTool:
+        """Focused VLM call for plan-view detection (SOLUTION-DESIGN-V2 §5.3).
 
         ``image`` is the full-page raster (typically ``ctx.source.raster_probe``
         at probe DPI). The implementation downscales internally so smaller
-        models stay within their native input window. Returned bboxes are
-        normalized [0, 1] in the page's coord space (post-rotation, pre-tile);
-        the calling stage scales them to ``RectPt``.
+        models stay within their native input window. Returns a single
+        normalized [0, 1] bbox or ``None`` when no plan view is present;
+        the calling stage pads and scales the bbox to ``RectPt``.
+        """
+        ...
+
+    def detect_legend(self, image: Image) -> LegendRegionTool:
+        """Focused VLM call for legend detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same input as ``detect_plan_view``. Returns zero or more normalized
+        [0, 1] bboxes — engineering drawings frequently split the legend
+        into a symbol box and a separate abbreviation table, so the
+        multi-bbox shape is preserved here. An empty list means "no
+        legend on this drawing"; the calling stage treats that as a
+        non-failure (``layout.legend = None``).
         """
         ...
 
