@@ -34,6 +34,7 @@ Locked decisions (SOLUTION-DESIGN-V2 §5.3, §7):
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 
 import cv2
@@ -77,7 +78,19 @@ _MIN_RECT_FRACTION = 0.05
 # benchmark set without false-positiving title-block text (which is dominated
 # by SCALE/DRAWN BY/PROJECT keywords already gated to the lower-right).
 _PLAN_VIEW_KEYWORDS = ("PLAN", "LEVEL", "FLOOR", "MECHANICAL PLAN", "LAYOUT", "HVAC")
-_LEGEND_KEYWORDS = ("LEGEND",)
+# Legend headings vary widely by drawing house: this drawing uses
+# "DESCRIPTION", others use "SYMBOLS"/"ABBREVIATIONS"/"LEGEND OF SYMBOLS".
+# Matching is exact-word (whitespace-bounded) — see
+# ``_text_blob_contains_keyword`` — so "LEGEND" does NOT false-match
+# "LEGENDARY". Multi-word phrases must appear as that contiguous phrase,
+# also whitespace-bounded.
+_LEGEND_KEYWORDS = (
+    "LEGEND",
+    "SYMBOLS",
+    "ABBREVIATIONS",
+    "DESCRIPTION",
+    "LEGEND OF SYMBOLS",
+)
 _NOTES_KEYWORDS = ("NOTES", "GENERAL NOTES")
 _SCHEDULE_KEYWORDS = ("SCHEDULE",)
 _TITLE_BLOCK_KEYWORDS = ("PROJECT", "DRAWN BY", "DATE", "SCALE")
@@ -254,7 +267,7 @@ class PageCategorizerStage(PipelineStage):
             # section_detail / unknown are intentionally dropped — they are
             # neither plan view nor named regions we surface in this PR.
 
-        plan_view = _pick_largest_plan_view(plan_views, ctx)
+        plan_view = _select_plan_view(plan_views, ctx)
         named_regions: dict[str, RectPt | None | list[RectPt]] = {
             "title_block": title_block,
             "schedule": schedule,
@@ -616,6 +629,18 @@ def _matches_in_rect(
     return contained
 
 
+def _text_blob_contains_keyword(text_blob: str, keyword: str) -> bool:
+    """Whitespace-bounded keyword match against a contained-OCR text blob.
+
+    Used by the legend keyword check so "LEGEND" does not false-match
+    "LEGENDARY" and "DESCRIPTION" does not false-match "MISDESCRIPTIONS".
+    Multi-word keywords like "LEGEND OF SYMBOLS" must appear as that
+    contiguous phrase. Both inputs are upper-cased by the caller already.
+    """
+    pattern = r"(?<!\w)" + re.escape(keyword) + r"(?!\w)"
+    return re.search(pattern, text_blob) is not None
+
+
 def _classify_by_keywords(
     text_blob: str,
     rect_px: tuple[int, int, int, int],
@@ -627,8 +652,15 @@ def _classify_by_keywords(
     layers a position constraint (lower-right quadrant) on top of its keyword
     set because PROJECT/DATE/SCALE words occur in legends and notes too.
     Returns ``unknown`` if no keyword matches.
+
+    Legend keywords use word-boundary matching (see
+    ``_text_blob_contains_keyword``) because the widened set includes generic
+    English words like "DESCRIPTION" — substring matching against those
+    would false-match too much surrounding text. The other keyword sets stay
+    on substring matching: "FLOOR PLAN" must still classify as plan_view via
+    the "PLAN" keyword, "GENERAL NOTES" via "NOTES", etc.
     """
-    if any(k in text_blob for k in _LEGEND_KEYWORDS):
+    if any(_text_blob_contains_keyword(text_blob, k) for k in _LEGEND_KEYWORDS):
         return "legend"
     if any(k in text_blob for k in _NOTES_KEYWORDS):
         return "notes"
@@ -664,19 +696,121 @@ def _is_lower_right(
     )
 
 
-def _pick_largest_plan_view(
-    plan_views: list[RectPt], ctx: PipelineContext
-) -> RectPt | None:
-    """Pick the largest plan-view rect by area; warn if more than one."""
-    if not plan_views:
-        return None
-    if len(plan_views) > 1:
-        ctx.errors.append("multi_plan_view_detected")
-    picked = max(plan_views, key=_rect_area)
-    logger.info(
-        "page_categorize: picked largest of %d plan_view candidate(s)", len(plan_views)
+# Containment thresholds for the "smaller better" tie-break in
+# ``_select_plan_view``. A parent must be strictly larger than the child by
+# this area ratio (so two rects of nearly identical size don't pretend to
+# nest), and the child's outer boundary must lie inside the parent's outer
+# boundary with at most this much slop on every side. The slop is expressed
+# as a fraction of the PARENT's side length on that axis — small Hough
+# rounding errors at shared dividers can push a child a few pixels past the
+# parent edge without it actually escaping the region.
+_PLAN_VIEW_PARENT_AREA_RATIO = 1.5
+_PLAN_VIEW_CONTAINMENT_SLOP = 0.05
+
+
+def _is_contained(child: RectPt, parent: RectPt) -> bool:
+    """True if ``child`` lies inside ``parent`` with ≤ 5% boundary slop."""
+    cx0, cy0, cx1, cy1 = child
+    px0, py0, px1, py1 = parent
+    pw = max(px1 - px0, 0.0)
+    ph = max(py1 - py0, 0.0)
+    if pw <= 0 or ph <= 0:
+        return False
+    slop_x = pw * _PLAN_VIEW_CONTAINMENT_SLOP
+    slop_y = ph * _PLAN_VIEW_CONTAINMENT_SLOP
+    return (
+        cx0 >= px0 - slop_x
+        and cy0 >= py0 - slop_y
+        and cx1 <= px1 + slop_x
+        and cy1 <= py1 + slop_y
     )
-    return picked
+
+
+def _select_plan_view(
+    candidates: list[RectPt], ctx: PipelineContext
+) -> RectPt | None:
+    """Pick the plan-view rect from a list of plan-view candidates.
+
+    Selection rules:
+
+      • Zero candidates → ``None`` (caller falls back to whole-page per §7).
+      • One candidate → that candidate.
+      • Multiple candidates with a containment relationship → the deepest
+        child (smaller is better). This fixes the "outer rect with HVAC
+        LAYOUT title" anti-pattern: a page-wide rect that contains the
+        title-bar text "HVAC LAYOUT" picks up plan_view classification
+        even though the actual plan view is the inset rect, which also
+        contains those keywords. Without this tie-break the largest-by-
+        area rule picked the outer (page-wide) rect and the legend +
+        title + heading stayed inside ``plan_view``, defeating §5.3's
+        reason for existing.
+      • Multiple candidates with NO containment relationship (e.g. side-by-
+        side multi-plan-view sheet) → largest by area, with the
+        ``multi_plan_view_detected`` warning. This preserves V2 §7's
+        documented behaviour.
+
+    A "containment relationship" requires both: parent area > 1.5× child
+    area AND child geometrically inside parent with ≤ 5% boundary slop.
+    The area ratio gate prevents two near-equal rects from triggering the
+    smaller-better path on noise.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Build a containment graph: ``children[i]`` lists the indices of every
+    # rect that is strictly contained inside candidates[i] (with the area
+    # ratio + slop constraints above). The deepest child in this DAG is
+    # the rect we want — it's the most-inset rectangle that still picked up
+    # plan_view keywords, and it cannot itself contain any other plan_view
+    # candidate.
+    children: dict[int, list[int]] = {i: [] for i in range(len(candidates))}
+    has_parent: set[int] = set()
+    for i, parent in enumerate(candidates):
+        for j, child in enumerate(candidates):
+            if i == j:
+                continue
+            if (
+                _rect_area(parent) > _PLAN_VIEW_PARENT_AREA_RATIO * _rect_area(child)
+                and _is_contained(child, parent)
+            ):
+                children[i].append(j)
+                has_parent.add(j)
+
+    any_containment = any(children[i] for i in children)
+    if not any_containment:
+        # No nesting at all → side-by-side multi-plan-view sheet. Preserve
+        # V2 §7 behaviour: largest by area + warn.
+        ctx.errors.append("multi_plan_view_detected")
+        picked = max(candidates, key=_rect_area)
+        logger.info(
+            "page_categorize: picked largest of %d plan_view candidate(s) "
+            "(no containment relation)",
+            len(candidates),
+        )
+        return picked
+
+    # Containment exists. Pick the deepest child — i.e. a rect that is
+    # contained by something AND contains nothing itself in the candidate
+    # list. If multiple leaves exist (the containment DAG branches),
+    # smallest by area wins — that's the most-inset region and the safest
+    # plan_view. Don't fire the multi-plan-view warning here: nested
+    # candidates are an artefact of one real plan view inside an outer
+    # shell, not two real plan views.
+    leaves = [i for i in children if not children[i] and i in has_parent]
+    if not leaves:
+        # Pathological: every candidate has a child but also a parent.
+        # Should not occur for axis-aligned rects (DAG must have a leaf),
+        # but defend with the largest-by-area fallback.
+        return max(candidates, key=_rect_area)
+    picked_idx = min(leaves, key=lambda i: _rect_area(candidates[i]))
+    logger.info(
+        "page_categorize: picked nested plan_view (%d candidates, %d leaves)",
+        len(candidates),
+        len(leaves),
+    )
+    return candidates[picked_idx]
 
 
 def _rect_area(rect: RectPt) -> float:

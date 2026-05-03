@@ -29,6 +29,7 @@ from app.pipeline.categorize import (
     PageCategorizerStage,
     _is_strip,
     _merge_strips,
+    _select_plan_view,
 )
 from app.source.base import DrawingSource
 from app.vlm.tools import CategorizePageTool, DetectionResult
@@ -445,3 +446,135 @@ def test_categorizer_layout_keyword_matches_plan_view() -> None:
     px0, py0, px1, py1 = ctx.layout.plan_view
     assert px0 <= 100 < px1
     assert py0 <= 100 < py1
+
+
+# ── Widened legend keyword set (DESCRIPTION / SYMBOLS / ABBREVIATIONS) ───────
+
+
+def test_legend_keyword_matches_description() -> None:
+    """The legend on this drawing is headed "DESCRIPTION" — the widened
+    keyword set must classify that rect as legend so downstream §5.4 has
+    something to parse. Pre-fix the categorizer matched only the literal
+    "LEGEND" and missed every benchmark whose legend used "DESCRIPTION"
+    or another industry synonym.
+    """
+    img = _quadrant_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),  # top-left → plan_view
+        _match("DESCRIPTION", x=500, y=100),  # top-right → legend
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    PageCategorizerStage(_StubVLM()).run(ctx)
+
+    assert ctx.layout is not None
+    assert ctx.layout.legend is not None
+    lx0, _, _, _ = ctx.layout.legend
+    assert lx0 >= 380  # right of the divider — top-right quadrant
+
+
+def test_legend_keyword_matches_symbols() -> None:
+    """Drawings using "SYMBOLS" as the legend heading must be recognised."""
+    img = _quadrant_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("SYMBOLS", x=500, y=100),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    PageCategorizerStage(_StubVLM()).run(ctx)
+
+    assert ctx.layout is not None
+    assert ctx.layout.legend is not None
+
+
+def test_legend_keyword_matches_abbreviations() -> None:
+    """Drawings using "ABBREVIATIONS" as the legend heading must be recognised."""
+    img = _quadrant_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("ABBREVIATIONS", x=500, y=100),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    PageCategorizerStage(_StubVLM()).run(ctx)
+
+    assert ctx.layout is not None
+    assert ctx.layout.legend is not None
+
+
+def test_legend_keyword_word_boundary() -> None:
+    """Substring matching would false-fire "LEGEND" against "LEGENDARY".
+
+    The widened legend keyword set includes generic English words
+    (DESCRIPTION) that would match too aggressively under substring rules,
+    so the matcher uses whitespace-bounded equality. This regression test
+    pins that contract: a rect whose only OCR text is "LEGENDARY DESIGN"
+    must NOT be classified as legend.
+    """
+    img = _quadrant_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),  # top-left → plan_view
+        # Top-right: text that contains "LEGEND" as a substring but not as
+        # a whitespace-bounded word.
+        _match("LEGENDARY DESIGN", x=500, y=100),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+
+    PageCategorizerStage(_StubVLM()).run(ctx)
+
+    assert ctx.layout is not None
+    # No legend identified — the substring "LEGEND" inside "LEGENDARY"
+    # is rejected by the word-boundary rule.
+    assert ctx.layout.legend is None
+
+
+# ── Plan-view selection: smaller-better when nested ──────────────────────────
+
+
+def test_plan_view_prefers_smaller_when_contained() -> None:
+    """Two plan_view candidates with one nested inside the other → pick child.
+
+    The page-wide outer rect picks up plan_view classification because the
+    title bar "HVAC LAYOUT" sits inside it; the inset content rect also
+    picks up plan_view classification on the same keywords. Pre-fix the
+    largest-by-area rule picked the outer rect and let the legend / title /
+    heading stay inside ``plan_view``. The "smaller better" tie-break
+    selects the child instead, and does NOT fire the multi-plan-view
+    warning — the outer rect isn't a real second plan view.
+    """
+    # Build directly against _select_plan_view to keep the geometry exact;
+    # Hough decomposition would round the rects by a few pixels and make
+    # the assertion fragile.
+    outer = (0.0, 0.0, 1000.0, 800.0)  # 1000x800 — page-wide
+    inner = (100.0, 100.0, 700.0, 600.0)  # 600x500 — strictly inside outer
+    # parent area = 800_000; child area = 300_000 → 2.67× ratio, > 1.5× gate.
+
+    ctx = PipelineContext(drawing_id="t", original_filename="t.png")
+    picked = _select_plan_view([outer, inner], ctx)
+
+    assert picked == inner
+    # Critical: nested candidates must NOT trigger multi_plan_view_detected.
+    assert "multi_plan_view_detected" not in ctx.errors
+
+
+def test_plan_view_largest_when_side_by_side() -> None:
+    """Two plan_view candidates side-by-side → pick largest, fire warning.
+
+    Side-by-side (no containment) is the genuine multi-plan-view edge case
+    the §7 warning targets. Verifying that path still works after the
+    nested-preference change.
+    """
+    left = (0.0, 0.0, 400.0, 800.0)  # 320_000 area
+    right = (400.0, 0.0, 1000.0, 800.0)  # 480_000 area
+    # Neither contains the other — they meet at x=400 with no overlap.
+
+    ctx = PipelineContext(drawing_id="t", original_filename="t.png")
+    picked = _select_plan_view([left, right], ctx)
+
+    assert picked == right  # largest by area
+    assert "multi_plan_view_detected" in ctx.errors
