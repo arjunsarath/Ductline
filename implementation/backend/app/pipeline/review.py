@@ -112,6 +112,7 @@ class ReviewerStage(PipelineStage):
         *,
         max_iterations: int = 2,
         per_drawing_budget: int = 40,
+        max_segments_per_drawing: int | None = 5,
     ) -> None:
         # Per V2 §6.1: stages take engines/clients only. ctx.segments_draft,
         # ctx.source, ctx.legend, ctx.pressure_classes are read at run() time.
@@ -122,6 +123,15 @@ class ReviewerStage(PipelineStage):
         # upper bound (V2 §5.6).
         self._max_iterations = max(1, min(max_iterations, _MAX_ITERATIONS_CEILING))
         self._per_drawing_budget = max(0, per_drawing_budget)
+        # Reviewer cap for the example/dev workflow. Real drawings can have
+        # 60+ segments and reviewing each takes ~10s on cloud — that's a
+        # 10-minute review stage that dwarfs detection. Capping at 5 keeps
+        # the demo loop tight; production should pass None to remove the
+        # cap (still bounded by per_drawing_budget) and run the reviewer as
+        # a background batch.
+        self._max_segments_per_drawing = (
+            None if max_segments_per_drawing is None else max(0, max_segments_per_drawing)
+        )
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
         try:
@@ -148,14 +158,32 @@ class ReviewerStage(PipelineStage):
         budget = self._per_drawing_budget
         budget_warned = False
         total = len(ctx.segments_draft)
+        cap = self._max_segments_per_drawing
+        # Effective total exposed to the UI is the smaller of the cap
+        # and the actual draft count — so the progress bar shows
+        # "5/5" instead of "5/64" when the cap is in effect.
+        if cap is not None and cap < total:
+            displayed_total = cap
+            ctx.errors.append(
+                f"reviewer: capping review at first {cap} segments "
+                f"(of {total} drafts); raise reviewer_max_segments_per_drawing "
+                f"or set to None for full review"
+            )
+        else:
+            displayed_total = total
 
         for index, draft in enumerate(ctx.segments_draft, start=1):
+            # Hard cap before we even emit the progress event — anything
+            # past `cap` is left at default not_reviewed / iterations=0
+            # silently (the warning above already named the situation).
+            if cap is not None and index > cap:
+                break
             if ctx.progress is not None:
                 ctx.progress("review_start", {
                     "stage": "review",
                     "segment_id": draft.segment_id,
                     "current": index,
-                    "total": total,
+                    "total": displayed_total,
                 })
             if budget <= 0:
                 if not budget_warned:
@@ -172,7 +200,7 @@ class ReviewerStage(PipelineStage):
                         "stage": "review",
                         "segment_id": draft.segment_id,
                         "current": index,
-                        "total": total,
+                        "total": displayed_total,
                         "skipped": "budget_exhausted",
                     })
                 continue
@@ -201,7 +229,7 @@ class ReviewerStage(PipelineStage):
                         "stage": "review",
                         "segment_id": draft.segment_id,
                         "current": index,
-                        "total": total,
+                        "total": displayed_total,
                         "error": str(exc),
                     })
                 continue
@@ -211,7 +239,7 @@ class ReviewerStage(PipelineStage):
                     "stage": "review",
                     "segment_id": draft.segment_id,
                     "current": index,
-                    "total": total,
+                    "total": displayed_total,
                     "verdict": draft.review_verdict,
                     "iterations": draft.review_iterations,
                 })
