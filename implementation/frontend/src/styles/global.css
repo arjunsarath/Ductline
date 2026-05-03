@@ -668,6 +668,9 @@ a {
 .approval-panel-head {
   padding: 24px 32px 16px;
   border-bottom: 1px solid var(--border-subtle, #E5E1D6);
+  /* Lock natural height so the body's flex: 1 + overflow:auto don't
+     push the head or foot off-screen on short viewports. */
+  flex-shrink: 0;
 }
 .approval-panel-title {
   font-size: 22px;
@@ -686,6 +689,10 @@ a {
   justify-content: flex-end;
   gap: 12px;
   background: var(--bg-subtle, #FAFAF7);
+  /* Pin the foot — without this the body's flex:1 plus the foot's
+     default flex-shrink:1 lets the buttons get squeezed (or pushed
+     below the fold on the tiling gate) so the user can't click them. */
+  flex-shrink: 0;
 }
 .approval-panel-empty {
   padding: 32px;
@@ -755,6 +762,10 @@ a {
 
 .approval-tiling {
   flex: 1;
+  /* min-height: 0 — without this the flexbox default
+     min-height:auto prevents overflow:auto from kicking in on
+     constrained viewports (the foot would be pushed out of view). */
+  min-height: 0;
   padding: 16px 32px 32px;
   overflow-y: auto;
 }
@@ -842,6 +853,27 @@ a {
 .approval-toolbar-button--active {
   background: #FEF3C7;
   border-color: #F59E0B;
+}
+.approval-toolbar-zoom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border-left: 1px solid var(--border-subtle, #E5E1D6);
+  border-right: 1px solid var(--border-subtle, #E5E1D6);
+  margin-right: 8px;
+}
+.approval-toolbar-zoom .approval-toolbar-button {
+  min-width: 32px;
+  text-align: center;
+  font-weight: 500;
+}
+.approval-toolbar-zoom-readout {
+  min-width: 48px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 .draw-mode-banner {
   display: flex;

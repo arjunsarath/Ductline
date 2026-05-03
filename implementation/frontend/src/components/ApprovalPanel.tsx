@@ -222,6 +222,10 @@ function CategorizeEditor({
   const [drawMode, setDrawMode] = useState<RegionKind | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [draw, setDraw] = useState<DrawState | null>(null);
+  // Zoom + pan around the editor's SVG. ``zoom`` scales the visible
+  // viewBox down (so content appears bigger); ``panX/Y`` translate it.
+  // Both default to identity. Wheel zooms anchor on the cursor position.
+  const [view, setView] = useState({ zoom: 1.0, panX: 0, panY: 0 });
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   // Reset when a new gate payload arrives (e.g. rerun) — useMemo above
@@ -231,6 +235,7 @@ function CategorizeEditor({
     setDrawMode(null);
     setDrag(null);
     setDraw(null);
+    setView({ zoom: 1.0, panX: 0, panY: 0 });
   }, [original]);
 
   /** Translate a pointer event to viewBox (source-coord) coordinates.
@@ -455,6 +460,62 @@ function CategorizeEditor({
     );
   }
 
+  // viewBox tracks zoom + pan. At zoom=1 it's the full source rect;
+  // zooming halves the visible width/height per step and re-centers on
+  // the current pan point so the wheel-anchored math (below) stays
+  // intuitive.
+  const [sourceW, sourceH] = sourceSize;
+  const vbW = sourceW / view.zoom;
+  const vbH = sourceH / view.zoom;
+  const vbX = view.panX;
+  const vbY = view.panY;
+  const viewBoxStr = `${vbX} ${vbY} ${vbW} ${vbH}`;
+
+  const zoomAt = useCallback(
+    (factor: number, anchorX?: number, anchorY?: number) => {
+      setView((prev) => {
+        const newZoom = Math.max(0.5, Math.min(8.0, prev.zoom * factor));
+        if (newZoom === prev.zoom) return prev;
+        // Anchor the zoom on a viewBox-space point (cursor on wheel,
+        // viewport centre on button click). Math: keep the anchor at
+        // the same screen position by shifting pan so its fractional
+        // distance into the visible viewBox is preserved.
+        const f = newZoom / prev.zoom;
+        const ax = anchorX ?? prev.panX + sourceW / prev.zoom / 2;
+        const ay = anchorY ?? prev.panY + sourceH / prev.zoom / 2;
+        return {
+          zoom: newZoom,
+          panX: ax - (ax - prev.panX) / f,
+          panY: ay - (ay - prev.panY) / f,
+        };
+      });
+    },
+    [sourceW, sourceH],
+  );
+  const resetView = useCallback(() => {
+    setView({ zoom: 1.0, panX: 0, panY: 0 });
+  }, []);
+
+  // Wheel zoom — must use a native non-passive listener so we can
+  // preventDefault. React's onWheel is passive by default.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const handler = (event: WheelEvent) => {
+      event.preventDefault();
+      const factor = event.deltaY > 0 ? 0.85 : 1.18;
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      const pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      const local = pt.matrixTransform(ctm.inverse());
+      zoomAt(factor, local.x, local.y);
+    };
+    svg.addEventListener("wheel", handler, { passive: false });
+    return () => svg.removeEventListener("wheel", handler);
+  }, [zoomAt]);
+
   return (
     <>
       <Toolbar
@@ -462,12 +523,16 @@ function CategorizeEditor({
         drawMode={drawMode}
         onStartDrawing={startDrawing}
         onReset={reset}
+        zoom={view.zoom}
+        onZoomIn={() => zoomAt(1.25)}
+        onZoomOut={() => zoomAt(0.8)}
+        onResetView={resetView}
       />
       <div className="approval-overlay-wrap">
         <svg
           ref={svgRef}
           className={`approval-overlay${drawMode !== null ? " approval-overlay--drawing" : ""}`}
-          viewBox={`0 0 ${sourceSize[0]} ${sourceSize[1]}`}
+          viewBox={viewBoxStr}
           preserveAspectRatio="xMidYMid meet"
           onPointerDown={onSvgPointerDown}
           onPointerMove={onSvgPointerMove}
@@ -729,11 +794,19 @@ function Toolbar({
   drawMode,
   onStartDrawing,
   onReset,
+  zoom,
+  onZoomIn,
+  onZoomOut,
+  onResetView,
 }: {
   layout: EditLayout;
   drawMode: RegionKind | null;
   onStartDrawing: (kind: RegionKind) => void;
   onReset: () => void;
+  zoom: number;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetView: () => void;
 }) {
   // Singletons only show "Add" when the slot is currently null. Lists
   // (notes, legend block) always show — multiple entries are allowed.
@@ -781,12 +854,43 @@ function Toolbar({
           </button>
         ))}
       <span className="approval-toolbar-spacer" />
+      <div className="approval-toolbar-zoom">
+        <button
+          type="button"
+          className="approval-toolbar-button"
+          onClick={onZoomOut}
+          aria-label="Zoom out"
+          title="Zoom out (or scroll wheel)"
+        >
+          −
+        </button>
+        <span className="approval-toolbar-zoom-readout mono">
+          {Math.round(zoom * 100)}%
+        </span>
+        <button
+          type="button"
+          className="approval-toolbar-button"
+          onClick={onZoomIn}
+          aria-label="Zoom in"
+          title="Zoom in (or scroll wheel)"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className="approval-toolbar-button"
+          onClick={onResetView}
+          title="Fit to page"
+        >
+          Fit
+        </button>
+      </div>
       <button
         type="button"
         className="approval-toolbar-button"
         onClick={onReset}
       >
-        Reset
+        Reset edits
       </button>
     </div>
   );
