@@ -13,9 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.deps import get_pipeline
+from app.api.sse import stream_detect
 from app.pipeline.base import PipelineError
 from app.pipeline.runner import DetectionPipeline
 from app.schemas import DrawingResult, SampleDrawing
@@ -26,11 +27,51 @@ _SAMPLES_DIR = Path("/drawings")
 _SAMPLE_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 
 
-@router.post("/detect", response_model=DrawingResult)
+@router.post("/detect")
 async def detect(
     file: UploadFile = File(...),
     pipeline: DetectionPipeline = Depends(get_pipeline),
+) -> StreamingResponse:
+    """Stream pipeline progress via SSE; final ``result`` event carries the JSON.
+
+    The pipeline runs synchronously in a worker thread; this generator yields
+    one ``progress`` event per pipeline-emitted callback (stage start/done,
+    per-tile detect, per-segment review), then a terminal ``result`` or
+    ``error`` event. The frontend's ``api/client.ts`` consumes the stream
+    and updates the processing UI in real time.
+
+    Note: the response model is no longer ``DrawingResult`` because the
+    payload is text/event-stream; the JSON inside the final ``result`` event
+    matches the previous schema unchanged.
+    """
+    file_bytes = await file.read()
+    return StreamingResponse(
+        stream_detect(
+            pipeline,
+            file_bytes,
+            original_filename=file.filename or "uploaded",
+        ),
+        media_type="text/event-stream",
+        headers={
+            # Disable buffering by reverse proxies so events stream live.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/detect/blocking", response_model=DrawingResult)
+async def detect_blocking(
+    file: UploadFile = File(...),
+    pipeline: DetectionPipeline = Depends(get_pipeline),
 ) -> DrawingResult:
+    """Non-streaming detect — preserved for tooling that wants a single JSON.
+
+    Behaviourally identical to v1's ``/detect``: blocks until the pipeline
+    finishes and returns ``DrawingResult``. The frontend uses ``/detect``
+    (the streaming variant); this endpoint is here for ad-hoc testing
+    (curl, integration scripts) where SSE parsing is overkill.
+    """
     file_bytes = await file.read()
     try:
         return pipeline.run(file_bytes, original_filename=file.filename or "uploaded")

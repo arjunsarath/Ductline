@@ -147,8 +147,16 @@ class ReviewerStage(PipelineStage):
 
         budget = self._per_drawing_budget
         budget_warned = False
+        total = len(ctx.segments_draft)
 
-        for draft in ctx.segments_draft:
+        for index, draft in enumerate(ctx.segments_draft, start=1):
+            if ctx.progress is not None:
+                ctx.progress("review_start", {
+                    "stage": "review",
+                    "segment_id": draft.segment_id,
+                    "current": index,
+                    "total": total,
+                })
             if budget <= 0:
                 if not budget_warned:
                     ctx.errors.append(
@@ -159,6 +167,14 @@ class ReviewerStage(PipelineStage):
                     budget_warned = True
                 # Leave the draft as-is — defaults are already
                 # review_verdict="not_reviewed", review_iterations=0.
+                if ctx.progress is not None:
+                    ctx.progress("review_done", {
+                        "stage": "review",
+                        "segment_id": draft.segment_id,
+                        "current": index,
+                        "total": total,
+                        "skipped": "budget_exhausted",
+                    })
                 continue
 
             try:
@@ -180,8 +196,25 @@ class ReviewerStage(PipelineStage):
                 # Leave the draft at pre-review defaults; the previous
                 # exception may have happened mid-iteration but defaults are
                 # only changed on success paths inside ``_review_one``.
+                if ctx.progress is not None:
+                    ctx.progress("review_done", {
+                        "stage": "review",
+                        "segment_id": draft.segment_id,
+                        "current": index,
+                        "total": total,
+                        "error": str(exc),
+                    })
                 continue
             budget -= used
+            if ctx.progress is not None:
+                ctx.progress("review_done", {
+                    "stage": "review",
+                    "segment_id": draft.segment_id,
+                    "current": index,
+                    "total": total,
+                    "verdict": draft.review_verdict,
+                    "iterations": draft.review_iterations,
+                })
 
         logger.info(
             "review: budget used=%d/%d",

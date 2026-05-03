@@ -8,8 +8,9 @@ enforced by `DetectionPipeline.stages` and validated by the assemble stage.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from app.ocr.cache import OCRCache
@@ -23,6 +24,13 @@ if TYPE_CHECKING:
         ReasoningStep,
     )
     from app.source.base import DrawingSource
+
+# Optional progress callback shape — stages call ``ctx.progress(event, payload)``
+# when set. The event name is a short snake_case identifier the SSE layer
+# turns into a named event; the payload is JSON-serialisable. Stages must
+# tolerate ``ctx.progress is None`` — progress is opt-in for the streaming
+# endpoint and absent on the test path.
+ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
 # ── Exceptions surfaced as HTTP errors by app.api.routes (§9). ────────────────
@@ -125,6 +133,11 @@ class PipelineContext:
 
     # Per-stage degradations surfaced to the client (§9).
     errors: list[str] = field(default_factory=list)
+
+    # Streaming progress hook — set by DetectionPipeline.run() when the
+    # caller passes a callback (SSE endpoint). Stages emit at meaningful
+    # boundaries (per-tile, per-segment) for the long-running ones.
+    progress: ProgressCallback | None = None
 
 
 # ── Stage protocol. ───────────────────────────────────────────────────────────

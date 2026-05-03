@@ -155,7 +155,15 @@ class TiledDuctDetectionStage(PipelineStage):
         # Per-tile call. We track results in tile order so trail context is
         # built from already-processed neighbours; see _build_trail_context.
         processed_by_tile: dict[tuple[int, int], list[_StitchedSegment]] = {}
-        for tile_rect, row, col, total_rows, total_cols in tiles:
+        for tile_index, (tile_rect, row, col, total_rows, total_cols) in enumerate(tiles, start=1):
+            if ctx.progress is not None:
+                ctx.progress("tile_start", {
+                    "stage": "duct_detect_tiled",
+                    "row": row,
+                    "col": col,
+                    "current": tile_index,
+                    "total": len(tiles),
+                })
             trail = _build_trail_context(
                 processed_by_tile, row, col, tile_rect
             )
@@ -170,6 +178,15 @@ class TiledDuctDetectionStage(PipelineStage):
                 dpi=dpi,
             )
             processed_by_tile[(row, col)] = stitched
+            if ctx.progress is not None:
+                ctx.progress("tile_done", {
+                    "stage": "duct_detect_tiled",
+                    "row": row,
+                    "col": col,
+                    "current": tile_index,
+                    "total": len(tiles),
+                    "segments_found": len(stitched),
+                })
 
         # Flatten and dedup across tiles.
         all_segments: list[_StitchedSegment] = [

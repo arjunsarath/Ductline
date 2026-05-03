@@ -1,20 +1,156 @@
 /**
  * API client. Vite's dev server proxies /api → backend (vite.config.ts).
+ *
+ * /api/detect now returns a Server-Sent Event stream (PR-D). The client
+ * consumes the stream incrementally — `progress` events drive the
+ * ProcessingView UI; the terminal `result` event resolves the Promise.
+ * Old single-shot JSON behaviour is preserved on /api/detect/blocking
+ * for tooling that wants curl-friendly output.
  */
 
 import type { DrawingResult, SampleDrawing } from "../types/api";
 
-export async function detectDrawing(file: File): Promise<DrawingResult> {
+/** One pipeline progress event. Names mirror the backend SSE vocabulary. */
+export type ProgressEvent =
+  | { event: "pipeline_start"; drawing_id: string; filename: string }
+  | { event: "stage_start"; stage: string; index: number; total: number }
+  | { event: "stage_done"; stage: string; ok: boolean; error?: string }
+  | {
+      event: "tile_start";
+      stage: "duct_detect_tiled";
+      row: number;
+      col: number;
+      current: number;
+      total: number;
+    }
+  | {
+      event: "tile_done";
+      stage: "duct_detect_tiled";
+      row: number;
+      col: number;
+      current: number;
+      total: number;
+      segments_found: number;
+    }
+  | {
+      event: "review_start";
+      stage: "review";
+      segment_id: string;
+      current: number;
+      total: number;
+    }
+  | {
+      event: "review_done";
+      stage: "review";
+      segment_id: string;
+      current: number;
+      total: number;
+      verdict?: string;
+      iterations?: number;
+      skipped?: string;
+      error?: string;
+    }
+  | { event: "pipeline_done"; drawing_id: string; segments: number; errors: number };
+
+/**
+ * POST a drawing and consume the SSE progress stream.
+ *
+ * @param file        The drawing file (PDF / PNG / JPG).
+ * @param onProgress  Called once per `progress` event received from the server.
+ *                    Optional — pass `undefined` to ignore progress entirely.
+ * @returns Promise that resolves with the final DrawingResult on the
+ *          terminal `result` event, or rejects with an Error on the
+ *          terminal `error` event / network failure.
+ */
+export async function detectDrawing(
+  file: File,
+  onProgress?: (event: ProgressEvent) => void,
+): Promise<DrawingResult> {
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await fetch("/api/detect", { method: "POST", body: formData });
+  const response = await fetch("/api/detect", {
+    method: "POST",
+    body: formData,
+    headers: { Accept: "text/event-stream" },
+  });
 
   if (!response.ok) {
     const message = await response.text();
     throw new Error(`detect failed (${response.status}): ${message}`);
   }
-  return (await response.json()) as DrawingResult;
+  if (!response.body) {
+    throw new Error("detect failed: no response body to stream");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: true });
+    }
+
+    // SSE records are terminated by a blank line (`\n\n`). Process every
+    // complete record left in the buffer; any trailing partial record
+    // stays in the buffer for the next chunk.
+    let separatorIndex = buffer.indexOf("\n\n");
+    while (separatorIndex !== -1) {
+      const record = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      const parsed = parseSseRecord(record);
+      if (parsed) {
+        if (parsed.event === "result") {
+          // Drain the rest of the stream defensively (the server should
+          // close after `result`, but be tolerant).
+          await reader.cancel().catch(() => {
+            /* ignore */
+          });
+          const resultPayload = parsed.data as { result: DrawingResult };
+          return resultPayload.result;
+        }
+        if (parsed.event === "error") {
+          const errorPayload = parsed.data as { message: string; status: number };
+          throw new Error(
+            `detect failed (${errorPayload.status}): ${errorPayload.message}`,
+          );
+        }
+        if (parsed.event === "progress" && onProgress) {
+          onProgress(parsed.data as ProgressEvent);
+        }
+      }
+      separatorIndex = buffer.indexOf("\n\n");
+    }
+
+    if (done) {
+      // Stream closed without a terminal `result`/`error` event.
+      throw new Error("detect failed: stream ended before result");
+    }
+  }
+}
+
+/** Parse a single SSE record. Returns `null` if the record is malformed. */
+function parseSseRecord(
+  record: string,
+): { event: string; data: unknown } | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of record.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+    // Other SSE fields (id:, retry:, comments) ignored — we don't use them.
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    return { event, data: JSON.parse(dataLines.join("\n")) };
+  } catch {
+    return null;
+  }
 }
 
 export async function listSamples(): Promise<SampleDrawing[]> {

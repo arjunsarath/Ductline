@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from app.ocr.base import OCRExtractor
 from app.pipeline.assemble import assemble_result
-from app.pipeline.base import PipelineContext, PipelineStage
+from app.pipeline.base import PipelineContext, PipelineStage, ProgressCallback
 from app.pipeline.categorize import PageCategorizerStage
 from app.pipeline.classify import PressureClassClassifier
 from app.pipeline.detect_tiled import TiledDuctDetectionStage
@@ -34,25 +34,67 @@ class DetectionPipeline:
         self._vlm = vlm
         self._ocr = ocr
 
-    def run(self, file_bytes: bytes, original_filename: str) -> DrawingResult:
+    def run(
+        self,
+        file_bytes: bytes,
+        original_filename: str,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> DrawingResult:
         ctx = PipelineContext(
             drawing_id=str(uuid4()),
             original_filename=original_filename,
+            progress=progress,
         )
+
+        if progress is not None:
+            progress("pipeline_start", {
+                "drawing_id": ctx.drawing_id,
+                "filename": original_filename,
+            })
 
         # Ingest is the only stage that's allowed to abort the pipeline — every
         # other stage is wrapped so a failure becomes a degradation, not a 500.
+        if progress is not None:
+            progress("stage_start", {"stage": "ingest", "index": 0, "total": 0})
         ctx = IngestStage(file_bytes, original_filename).run(ctx)
+        if progress is not None:
+            progress("stage_done", {"stage": "ingest", "ok": ctx.source is not None})
 
         try:
-            for stage in self._post_ingest_stages():
+            stages = self._post_ingest_stages()
+            total = len(stages)
+            for index, stage in enumerate(stages, start=1):
+                if progress is not None:
+                    progress("stage_start", {
+                        "stage": stage.name,
+                        "index": index,
+                        "total": total,
+                    })
                 try:
                     ctx = stage.run(ctx)
+                    ok = True
+                    err: str | None = None
                 except Exception as exc:  # noqa: BLE001 — partial-result by design (§9)
                     logger.exception("stage %s failed", stage.name)
                     ctx.errors.append(f"{stage.name}: {exc}")
+                    ok = False
+                    err = str(exc)
+                if progress is not None:
+                    progress("stage_done", {
+                        "stage": stage.name,
+                        "ok": ok,
+                        **({"error": err} if err else {}),
+                    })
 
-            return assemble_result(ctx)
+            result = assemble_result(ctx)
+            if progress is not None:
+                progress("pipeline_done", {
+                    "drawing_id": ctx.drawing_id,
+                    "segments": result.aggregate.total,
+                    "errors": len(result.errors),
+                })
+            return result
         finally:
             # Release the pymupdf Document for vector-PDF sources (ADR-0007).
             if ctx.source is not None:

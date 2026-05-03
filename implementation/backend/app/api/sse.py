@@ -1,0 +1,110 @@
+"""SSE bridge for streaming pipeline progress (PR-D).
+
+The pipeline runs synchronously; the FastAPI endpoint needs an async
+generator to drive ``StreamingResponse``. This module bridges the two:
+
+  • ``stream_detect()`` returns an async generator that yields SSE-formatted
+    bytes — one event per pipeline progress callback, then a terminal
+    ``result`` or ``error`` event.
+
+  • The pipeline runs in a worker thread (``asyncio.to_thread``) and posts
+    progress events to an ``asyncio.Queue`` via ``loop.call_soon_threadsafe``.
+    The generator awaits items from the queue and yields them as SSE.
+
+Why a queue and not a callback that yields directly: generators can't yield
+from inside a function call (the progress callback is a function reference,
+not a generator). A queue is the simplest thread-safe handoff.
+
+The SSE event vocabulary:
+
+  • ``progress`` — pipeline emitted a stage / tile / segment event. ``data``
+    is ``{event: <name>, ...payload}``.
+  • ``result`` — pipeline finished. ``data`` is the serialised DrawingResult.
+  • ``error`` — pipeline raised. ``data`` is ``{message, status}``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from collections.abc import AsyncGenerator
+from typing import Any
+
+from app.pipeline.base import PipelineError
+from app.pipeline.runner import DetectionPipeline
+
+logger = logging.getLogger(__name__)
+
+
+def _sse_event(name: str, data: dict[str, Any]) -> bytes:
+    """Format a single SSE event. ``\\n\\n`` is the SSE record terminator."""
+    return f"event: {name}\ndata: {json.dumps(data, default=str)}\n\n".encode()
+
+
+async def stream_detect(
+    pipeline: DetectionPipeline,
+    file_bytes: bytes,
+    original_filename: str,
+) -> AsyncGenerator[bytes, None]:
+    """Run the pipeline in a worker thread, stream progress as SSE bytes.
+
+    Yields a sequence of SSE records in this order:
+      1. zero or more ``progress`` events (one per pipeline progress callback)
+      2. exactly one terminal event — either ``result`` (success) or
+         ``error`` (a ``PipelineError`` propagated up; non-pipeline
+         exceptions also surface as ``error`` with status 500).
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+
+    # Sentinel value pushed once the worker thread completes — lets the
+    # generator know there will be no more progress events to await.
+    done_sentinel = ("__done__", {})
+
+    def progress_callback(event: str, payload: dict[str, Any]) -> None:
+        # Called from the worker thread. ``call_soon_threadsafe`` is the
+        # documented way to bridge a sync thread → asyncio loop.
+        loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
+
+    def run_pipeline() -> Any:
+        try:
+            return pipeline.run(
+                file_bytes,
+                original_filename=original_filename,
+                progress=progress_callback,
+            )
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, done_sentinel)
+
+    # Schedule the pipeline on a worker thread. We don't await the future
+    # yet — we drain the queue first so the client sees progress events.
+    pipeline_task = asyncio.create_task(asyncio.to_thread(run_pipeline))
+
+    try:
+        while True:
+            event, payload = await queue.get()
+            if event == "__done__":
+                break
+            yield _sse_event("progress", {"event": event, **payload})
+    except asyncio.CancelledError:
+        # Client disconnected mid-stream — the pipeline thread keeps going
+        # but its result is discarded. Re-raise so the StreamingResponse
+        # cleanup path runs.
+        pipeline_task.cancel()
+        raise
+
+    try:
+        result = await pipeline_task
+        # DrawingResult is a frozen pydantic BaseModel — model_dump gives a
+        # JSON-serialisable dict.
+        yield _sse_event("result", {"result": result.model_dump()})
+    except PipelineError as exc:
+        logger.warning("stream_detect: pipeline error: %s", exc)
+        yield _sse_event("error", {
+            "message": str(exc),
+            "status": exc.http_status,
+        })
+    except Exception as exc:  # noqa: BLE001 — surface as 500 SSE error
+        logger.exception("stream_detect: unexpected error")
+        yield _sse_event("error", {"message": str(exc), "status": 500})

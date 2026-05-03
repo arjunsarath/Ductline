@@ -609,6 +609,47 @@ a {
   font-weight: 400;
 }
 
+/* Failure state for stages that degraded mid-pipeline (PR-D). */
+.pipeline-row.is-failed .pipeline-status,
+.pipeline-row.is-failed .pipeline-row-name,
+.pipeline-row.is-failed .pipeline-row-time {
+  color: #dc2626;
+}
+.pipeline-row-error {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #dc2626;
+  word-break: break-word;
+}
+
+/* Sub-progress bar for stages that emit per-tile / per-segment events. */
+.pipeline-row-subprogress {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pipeline-row-subprogress-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--border-subtle, #E5E1D6);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.pipeline-row-subprogress-fill {
+  height: 100%;
+  background: var(--agent, #3B82F6);
+  transition: width 120ms ease-out;
+}
+.pipeline-row-subprogress-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .processing-foot {
   display: flex;
   align-items: center;
