@@ -650,30 +650,51 @@ def _render_tile_prompt(
     trail_context: list[dict],
     legend: Legend | None,
 ) -> str:
-    """Inject legend / tile-position / trail blocks into the v3 tile template.
+    """Render the per-tile detect prompt.
 
-    The template lives in ``prompts/detect_v3_tiled.txt`` (not ``.md``) so the
-    legacy ``_load_prompt`` lookup never picks it up by accident — tile prompts
-    are templated, not version-pinned.
+    Two variants live side-by-side:
+
+      • ``detect_v3_tiled.txt`` — clean prompt with NO legend mentions. Used
+        when ``legend`` is None (most drawings before LegendParserStage runs,
+        or drawings the user didn't supply a legend region for).
+      • ``detect_v3_tiled_with_legend.txt`` — leads with the legend block
+        and an explicit "Step 1 — apply the legend / Step 2 — detect"
+        framing. Used when ``legend`` is non-None.
+
+    Picking by variant rather than conditionally substituting in a single
+    template keeps the prompts simple and review-friendly: a model doesn't
+    receive instructions about reading a legend that doesn't exist, and the
+    with-legend version doesn't carry weakened "if a legend is present…"
+    qualifiers that small VLMs sometimes literally ignore.
     """
-    template_path = _PROMPTS_DIR / "detect_v3_tiled.txt"
+    has_legend = legend is not None and (
+        bool(legend.line_styles)
+        or bool(legend.symbols)
+        or bool(legend.abbreviations)
+        or legend.units != "unknown"
+    )
+    template_name = (
+        "detect_v3_tiled_with_legend.txt" if has_legend else "detect_v3_tiled.txt"
+    )
+    template_path = _PROMPTS_DIR / template_name
     if not template_path.exists():
-        raise VLMError("tile prompt template missing: detect_v3_tiled.txt")
+        raise VLMError(f"tile prompt template missing: {template_name}")
     template = template_path.read_text(encoding="utf-8")
 
-    legend_block = _format_legend_block(legend)
     tile_position_block = (
         f"(row {tile_position[0]}, col {tile_position[1]}) "
         f"of ({tile_position[2]}, {tile_position[3]})"
     )
     trail_block = _format_trail_block(trail_context)
 
-    return (
-        template
-        .replace("{LEGEND_BLOCK}", legend_block)
-        .replace("{TILE_POSITION_BLOCK}", tile_position_block)
-        .replace("{TRAIL_CONTEXT_BLOCK}", trail_block)
-    )
+    rendered = template.replace(
+        "{TILE_POSITION_BLOCK}", tile_position_block
+    ).replace("{TRAIL_CONTEXT_BLOCK}", trail_block)
+    # Only substitute the legend block on the with-legend template — the
+    # default template doesn't contain the placeholder.
+    if has_legend:
+        rendered = rendered.replace("{LEGEND_BLOCK}", _format_legend_block(legend))
+    return rendered
 
 
 def _render_review_prompt(
