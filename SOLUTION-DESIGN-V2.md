@@ -266,7 +266,7 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
 ### 5.6 MEP Reviewer with bounded refinement loop (P0)
 
 - **Gap:** G7, G8, G10. No second look, no self-reported confidence, no mechanism to elevate confidence.
-- **Change:** New stage 8. Per-segment review.
+- **Change:** Per-segment review.
   - **Reviewer call:** per-segment crop (bbox + ~300 px padding, rendered fresh from PDF at high DPI) + segment metadata + legend + schedule. Returns `verdict: Literal["plausible","implausible","uncertain"]` + a one-sentence `reason`.
   - **Confidence math (deterministic in code):** `plausible` → bump confidence band up; `implausible` → bump down; `uncertain` → no-op. We do not let the model emit a continuous confidence score — small models fabricate them.
   - **Refinement loop:** if verdict is not `plausible`, call `vlm.refine_segment(crop, critique, previous_geometry)`. Re-review. Loop with cap.
@@ -274,9 +274,37 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
   - **Oscillation early-exit:** if iteration N's geometry IoU > 0.95 vs iteration N-1, stop.
   - **Per-drawing budget:** `reviewer_per_drawing_budget = 40` total VLM calls. Hard stop. Surfaced as a warning.
   - **No rejection in v2.** Implausible segments stay with `confidence: low` and the critique threaded into the reasoning trace. Users see the multi-agent reasoning; they decide.
+- **Pipeline placement (post-assemble + parallel-with-UI):** the
+  reviewer is **not** part of the synchronous detect → assemble path.
+  The runner calls `assemble_result(ctx)` once after stage 7
+  (`pressure_class`), emits a `preliminary_result` SSE event with
+  every segment at `review_verdict: "not_reviewed"`, and **then**
+  runs the reviewer phase. The reviewer mutates `ctx.segments_draft`
+  in place; for each successfully-reviewed draft it emits a
+  `segment_reviewed` event whose payload carries the new verdict,
+  iteration count, post-bump `pressure_class`, and the appended
+  `reviewer_critique` / `reviewer_refine` reasoning steps. Once the
+  reviewer phase is done the runner re-assembles and emits a
+  terminal `result` event with the fully-reviewed `DrawingResult`.
+  The frontend switches to the result view on `preliminary_result`
+  and merges `segment_reviewed` events into a per-id override map so
+  verdicts and confidence bumps appear in-place — the user sees the
+  drawing within seconds and watches reviewer verdicts trickle in.
+  - **Why this shape, not a true background reviewer.** v2 has no
+    job-queue / worker-pool infrastructure; adding one is out of
+    scope for the dev-tool MVP. Running the reviewer in the same
+    SSE stream after assemble is the cheapest available
+    parallelism — the user's wall-clock wait drops from
+    *detection-time + reviewer-time* to *detection-time*, and the
+    reviewer continues to use a single in-process worker thread.
+    The example default caps the reviewer at 5 segments
+    (`reviewer_max_segments_per_drawing = 5`) so the demo loop
+    stays tight; production should set the cap to `None` and run
+    the reviewer as a true batch job. That migration is a runner
+    swap — the SSE event vocabulary is already streaming-friendly.
 - **Why now:** This is the v2 selling point. It also addresses the "all confidence is low" failure mode head-on.
 - **Priority:** P0.
-- **Expected impact:** Confidence band rises on segments the system gets right; failure modes are surfaced honestly on segments it gets wrong.
+- **Expected impact:** Confidence band rises on segments the system gets right; failure modes are surfaced honestly on segments it gets wrong. Result view appears as soon as detection finishes; reviewer verdicts arrive incrementally.
 - **Expected cost:** ~1.0 day. Prompt iteration is the main risk.
 
 ### 5.7 Frontend swap + reasoning-trace UI (P1)

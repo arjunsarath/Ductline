@@ -243,6 +243,26 @@ class ReviewerStage(PipelineStage):
                     "verdict": draft.review_verdict,
                     "iterations": draft.review_iterations,
                 })
+                # Emit a segment_reviewed event with the updated fields the
+                # frontend needs to refresh the segment in-place. Skip the
+                # no-op case — review_verdict is still "not_reviewed" only
+                # when ``_review_one`` bailed before recording a verdict
+                # (e.g. budget == 0 entry path), and the previous review_done
+                # event already named that situation.
+                if draft.review_verdict != "not_reviewed":
+                    pc = ctx.pressure_classes.get(draft.segment_id)
+                    ctx.progress("segment_reviewed", {
+                        "segment_id": draft.segment_id,
+                        "verdict": draft.review_verdict,
+                        "iterations": draft.review_iterations,
+                        "pressure_class": (
+                            pc.model_dump() if pc is not None else None
+                        ),
+                        "reasoning_trace": [
+                            step.model_dump()
+                            for step in draft.reasoning_trace
+                        ],
+                    })
 
         logger.info(
             "review: budget used=%d/%d",

@@ -62,6 +62,28 @@ export interface TilingApprovalPayload {
   }>;
 }
 
+/** Per-segment update emitted as the reviewer processes each draft
+ *  (SOLUTION-DESIGN-V2 §5.6). The frontend merges these into the
+ *  result-view's per-segment override map so verdicts and bumped
+ *  confidences appear in-place without a full re-render of the
+ *  preliminary result. */
+export interface SegmentReviewedPayload {
+  segment_id: string;
+  verdict: "plausible" | "implausible" | "uncertain" | "not_reviewed";
+  iterations: number;
+  pressure_class: {
+    value: "LOW" | "MEDIUM" | "HIGH";
+    confidence: "high" | "medium" | "low";
+    source: string;
+    alternatives: string[];
+  } | null;
+  reasoning_trace: Array<{
+    stage: string;
+    evidence: string;
+    iteration?: number | null;
+  }>;
+}
+
 /** One pipeline progress event. Names mirror the backend SSE vocabulary. */
 export type ProgressEvent =
   | { event: "pipeline_start"; drawing_id: string; filename: string }
@@ -104,21 +126,33 @@ export type ProgressEvent =
       skipped?: string;
       error?: string;
     }
+  | ({ event: "segment_reviewed" } & SegmentReviewedPayload)
   | { event: "pipeline_done"; drawing_id: string; segments: number; errors: number };
 
 /**
  * POST a drawing and consume the SSE progress stream.
  *
- * @param file        The drawing file (PDF / PNG / JPG).
- * @param onProgress  Called once per `progress` event received from the server.
- *                    Optional — pass `undefined` to ignore progress entirely.
- * @returns Promise that resolves with the final DrawingResult on the
- *          terminal `result` event, or rejects with an Error on the
- *          terminal `error` event / network failure.
+ * The server now runs detection in two phases (SOLUTION-DESIGN-V2 §5.6):
+ * detect → assemble emits a `preliminary_result` event whose segments
+ * carry `review_verdict: "not_reviewed"`; the reviewer then runs in the
+ * same stream and emits per-segment `segment_reviewed` progress events
+ * before a terminal `result` event with the fully-reviewed result.
+ *
+ * @param file           The drawing file (PDF / PNG / JPG).
+ * @param onProgress     Called once per `progress` event received from the
+ *                       server. Optional.
+ * @param onPreliminary  Called once with the assembled-but-not-yet-reviewed
+ *                       result the moment phase 1 completes. Lets the caller
+ *                       switch to the result view immediately while the
+ *                       reviewer keeps running. Optional.
+ * @returns Promise that resolves with the FINAL (post-reviewer)
+ *          DrawingResult on the terminal `result` event, or rejects with
+ *          an Error on the terminal `error` event / network failure.
  */
 export async function detectDrawing(
   file: File,
   onProgress?: (event: ProgressEvent) => void,
+  onPreliminary?: (result: DrawingResult) => void,
 ): Promise<DrawingResult> {
   const formData = new FormData();
   formData.append("file", file);
@@ -165,13 +199,18 @@ export async function detectDrawing(
           const resultPayload = parsed.data as { result: DrawingResult };
           return resultPayload.result;
         }
-        if (parsed.event === "error") {
+        if (parsed.event === "preliminary_result") {
+          // Detection finished; the reviewer phase is still to come. The
+          // server keeps the stream open — we keep reading until the
+          // terminal `result` event fires.
+          const resultPayload = parsed.data as { result: DrawingResult };
+          if (onPreliminary) onPreliminary(resultPayload.result);
+        } else if (parsed.event === "error") {
           const errorPayload = parsed.data as { message: string; status: number };
           throw new Error(
             `detect failed (${errorPayload.status}): ${errorPayload.message}`,
           );
-        }
-        if (parsed.event === "progress" && onProgress) {
+        } else if (parsed.event === "progress" && onProgress) {
           onProgress(parsed.data as ProgressEvent);
         }
       }

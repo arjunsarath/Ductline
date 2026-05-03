@@ -126,6 +126,26 @@ class DetectionPipeline:
                         # downstream stages see the edited rects.
                         _apply_layout_corrections(ctx, layout_corrections)
 
+            # Phase 1 complete — assemble a "preliminary" DrawingResult
+            # whose segments still carry the default review_verdict =
+            # "not_reviewed". The SSE bridge forwards this to the client
+            # so the result view appears immediately; reviewer verdicts
+            # trickle in as `segment_reviewed` events afterward
+            # (SOLUTION-DESIGN-V2 §5.6).
+            preliminary = assemble_result(ctx)
+            if progress is not None:
+                progress("preliminary_result", {
+                    "result": preliminary.model_dump(),
+                })
+
+            # Phase 2 — reviewer. Mutates ctx.segments_draft + ctx.pressure_classes
+            # in place; emits review_start / review_done / segment_reviewed
+            # progress events so the frontend can update segments live.
+            self._run_reviewer_phase(ctx)
+
+            # Re-assemble after the reviewer has updated drafts, so the
+            # final DrawingResult reflects the post-review verdicts and
+            # confidence bumps.
             result = assemble_result(ctx)
             if progress is not None:
                 progress("pipeline_done", {
@@ -139,11 +159,50 @@ class DetectionPipeline:
             if ctx.source is not None:
                 ctx.source.close()
 
+    def _run_reviewer_phase(self, ctx: PipelineContext) -> None:
+        """Run the post-assemble reviewer (SOLUTION-DESIGN-V2 §5.6).
+
+        Decoupled from ``_post_ingest_stages`` so the runner can emit
+        the preliminary result before the reviewer starts. Failures are
+        absorbed (logged into ``ctx.errors``) the same way they were
+        when the reviewer was an in-line stage — drafts retain pre-
+        review state and the pipeline still produces a final result.
+        """
+        progress = ctx.progress
+        if progress is not None:
+            progress("stage_start", {
+                "stage": "review",
+                "index": 0,
+                "total": 0,
+            })
+        stage = ReviewerStage(self._vlm, self._vlm)
+        try:
+            stage.run(ctx)
+            ok = True
+            err: str | None = None
+        except Exception as exc:  # noqa: BLE001 — degradation by design (§5.6)
+            logger.exception("review phase failed")
+            ctx.errors.append(f"reviewer: {exc}")
+            ok = False
+            err = str(exc)
+        if progress is not None:
+            progress("stage_done", {
+                "stage": "review",
+                "ok": ok,
+                **({"error": err} if err else {}),
+            })
+
     def _post_ingest_stages(self) -> list[PipelineStage]:
         # Probe OCR runs first (SOLUTION-DESIGN-V2 §5.2): it builds the global
         # text inventory the rest of the pipeline reads from. Quality, regions,
         # and detect each have their own OCR call sites today; cache-consumption
         # refactors land in later v2 PRs.
+        #
+        # The reviewer is intentionally NOT in this list — it runs AFTER the
+        # synchronous detect → assemble path, in ``_run_reviewer_phase``,
+        # so the user sees a preliminary result the moment detection is
+        # done and reviewer verdicts trickle in over the same SSE stream
+        # (SOLUTION-DESIGN-V2 §5.6).
         return [
             ProbeOCRStage(self._ocr),
             PageCategorizerStage(self._vlm),
@@ -153,11 +212,6 @@ class DetectionPipeline:
             TiledDuctDetectionStage(self._vlm),
             TextExtractionStage(self._ocr),
             PressureClassClassifier(),
-            # Reviewer takes the OllamaVisionClient as both VLMClient and
-            # ReviewerClient — the same instance implements both Protocols
-            # (PR-6). The reviewer mutates segments_draft in place; assemble
-            # plumbs review_verdict / review_iterations into final Segments.
-            ReviewerStage(self._vlm, self._vlm),
         ]
 
 

@@ -1218,6 +1218,35 @@ a {
   cursor: pointer;
 }
 
+/* Reviewer banner — shown while the post-assemble reviewer phase is
+ * still running (V2 §5.6). Pinned right under the topbar / quality
+ * banner; disappears the moment the final result lands. */
+.reviewer-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  font-size: 13px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted, #595e66);
+}
+.reviewer-banner-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: reviewer-spin 0.9s linear infinite;
+}
+.reviewer-banner-label {
+  font-variant-numeric: tabular-nums;
+}
+@keyframes reviewer-spin {
+  to { transform: rotate(360deg); }
+}
+
 .quality-metrics {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

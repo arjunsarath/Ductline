@@ -387,6 +387,58 @@ def test_reviewer_writes_review_iterations_count() -> None:
     assert segment.review_verdict == "implausible"
 
 
+def test_reviewer_emits_segment_reviewed_event_on_success() -> None:
+    """Successful per-segment review → ``segment_reviewed`` event with the
+    fields the frontend needs to update in-place.
+
+    Asserts the event carries verdict / iterations / pressure_class /
+    reasoning_trace; budget-exhausted segments DO NOT emit the event
+    (only ``review_done`` with skipped="budget_exhausted" fires for them).
+    """
+    drafts = [
+        _draft(segment_id="DUCT-1"),
+        _draft(segment_id="DUCT-2"),
+        _draft(segment_id="DUCT-3"),
+    ]
+    ctx = _ctx_with_drafts(drafts, pc_confidence="medium")
+    captured: list[tuple[str, dict]] = []
+    ctx.progress = lambda event, payload: captured.append((event, payload))
+    reviewer = _StubReviewer(
+        verdict=ReviewSegmentTool(verdict="plausible", reason="terminates at AHU")
+    )
+    vlm = _StubVLM()
+
+    # Budget = 2 → DUCT-1 + DUCT-2 reviewed, DUCT-3 budget-exhausted.
+    ReviewerStage(reviewer, vlm, per_drawing_budget=2).run(ctx)
+
+    reviewed_events = [p for e, p in captured if e == "segment_reviewed"]
+    assert len(reviewed_events) == 2, (
+        f"expected 2 segment_reviewed events (one per reviewed draft), "
+        f"got {len(reviewed_events)}: {reviewed_events}"
+    )
+
+    payload = reviewed_events[0]
+    assert payload["segment_id"] == "DUCT-1"
+    assert payload["verdict"] == "plausible"
+    assert payload["iterations"] == 1
+    # pressure_class carries the post-bump confidence (medium → high).
+    assert payload["pressure_class"]["confidence"] == "high"
+    assert payload["pressure_class"]["value"] == "LOW"
+    # reasoning_trace must include the appended reviewer_critique step.
+    trace_stages = [step["stage"] for step in payload["reasoning_trace"]]
+    assert "reviewer_critique" in trace_stages
+
+    # DUCT-3 was budget-exhausted; no segment_reviewed event for it.
+    reviewed_ids = {p["segment_id"] for p in reviewed_events}
+    assert "DUCT-3" not in reviewed_ids
+    # The skip path still emits review_done with skipped="budget_exhausted".
+    skip_events = [
+        p for e, p in captured
+        if e == "review_done" and p.get("skipped") == "budget_exhausted"
+    ]
+    assert len(skip_events) == 1
+
+
 def test_reviewer_stage_failure_is_degradation() -> None:
     """Stage-level exception (no source) → drafts preserved + 'reviewer:' error."""
     drafts = [_draft()]

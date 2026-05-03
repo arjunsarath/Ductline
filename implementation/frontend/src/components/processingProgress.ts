@@ -254,6 +254,15 @@ export function applyProgressEvent(
       return next;
     }
 
+    case "segment_reviewed":
+      // The reviewer phase emits these per processed draft (V2 §5.6). The
+      // ProgressState reducer doesn't track per-segment reviewer state —
+      // ResultView consumes the events directly to update segments
+      // in-place. We still accept the event in the union so the reducer
+      // doesn't fall through to the "unknown event" default and so
+      // lastEvent remains useful for status text.
+      return next;
+
     case "pipeline_done":
       next.completed = true;
       next.awaitingGate = null;

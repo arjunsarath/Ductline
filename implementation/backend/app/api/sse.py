@@ -19,7 +19,13 @@ The SSE event vocabulary:
 
   • ``progress`` — pipeline emitted a stage / tile / segment event. ``data``
     is ``{event: <name>, ...payload}``.
-  • ``result`` — pipeline finished. ``data`` is the serialised DrawingResult.
+  • ``preliminary_result`` — detect → assemble finished, but the reviewer
+    phase has not. ``data`` is ``{result: <DrawingResult>}`` with all
+    segments at ``review_verdict: "not_reviewed"``. The stream stays open
+    while the reviewer runs and emits ``segment_reviewed`` progress events.
+  • ``result`` — pipeline (including the reviewer phase) finished. ``data``
+    is the serialised final DrawingResult. Always preceded by exactly one
+    ``preliminary_result`` event in a successful run.
   • ``error`` — pipeline raised. ``data`` is ``{message, status}``.
 """
 
@@ -131,7 +137,15 @@ async def stream_detect(
                 event, payload = await queue.get()
                 if event == "__done__":
                     break
-                yield _sse_event("progress", {"event": event, **payload})
+                # ``preliminary_result`` is hoisted to its own SSE event
+                # type so the frontend can switch to the result view as
+                # soon as detection finishes — the reviewer phase keeps
+                # running and emits ``segment_reviewed`` progress events
+                # over the same stream (SOLUTION-DESIGN-V2 §5.6).
+                if event == "preliminary_result":
+                    yield _sse_event("preliminary_result", payload)
+                else:
+                    yield _sse_event("progress", {"event": event, **payload})
         except asyncio.CancelledError:
             # Client disconnected mid-stream — cancel the session so the
             # pipeline thread unblocks any pending approval wait, then

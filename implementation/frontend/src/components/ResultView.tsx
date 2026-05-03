@@ -1,14 +1,22 @@
 /**
  * Result view per Paper artboard 03 — top bar (brand + filename + zoom + toggles)
- * → optional quality banner → viewer + sidebar.
+ * → optional quality banner → reviewer banner (V2 §5.6) → viewer + sidebar.
  *
  * State: selection, grayscale, sidebar collapse, and a UI-only zoom percentage
  * (the canvas auto-fits and zoom is decorative in v1 — UI-SPEC §"Open until
  * first drawing"). Keyboard: ←/→ cycle selection, Esc clear, g grayscale, s sidebar.
+ *
+ * The reviewer can be running while this view is on screen (V2 §5.6 — we
+ * surface the assembled-but-not-yet-reviewed result as soon as detection
+ * finishes). `segmentUpdates` carries per-segment review verdicts and
+ * confidence bumps that arrive on the SSE stream after the preliminary
+ * result; we merge them into each segment before rendering so the
+ * popover / sidebar / viewer all see the latest reviewer output.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { DrawingResult } from "../types/api";
+import type { SegmentReviewedPayload } from "../api/client";
+import type { DrawingResult, Segment } from "../types/api";
 import { Brand } from "./Brand";
 import { QualityBanner } from "./QualityBanner";
 import { Sidebar } from "./Sidebar";
@@ -20,14 +28,32 @@ import {
   type Viewport,
 } from "./viewport";
 
+export interface ReviewerStatus {
+  current: number;
+  total: number;
+  running: boolean;
+}
+
 interface Props {
   filename: string;
   file: File;
   result: DrawingResult;
+  /** Per-segment reviewer updates that arrived after the preliminary
+   *  result was rendered. Empty once the final result lands. */
+  segmentUpdates?: Record<string, SegmentReviewedPayload>;
+  /** Reviewer phase progress; null after the reviewer completes. */
+  reviewerStatus?: ReviewerStatus | null;
   onReset: () => void;
 }
 
-export function ResultView({ filename, file, result, onReset }: Props) {
+export function ResultView({
+  filename,
+  file,
+  result,
+  segmentUpdates,
+  reviewerStatus,
+  onReset,
+}: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [grayscale, setGrayscale] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -49,7 +75,24 @@ export function ResultView({ filename, file, result, onReset }: Props) {
     setSelectedId(null);
   }, []);
 
-  const segmentIds = useMemo(() => result.segments.map((s) => s.id), [result.segments]);
+  // Merge per-segment reviewer updates onto the rendered result. The
+  // result object itself is left unchanged so memo identity holds for
+  // its other fields (display_image_data_url, aggregate, etc.); only
+  // the segments list is rebuilt when an update arrives.
+  const mergedResult = useMemo<DrawingResult>(() => {
+    if (!segmentUpdates || Object.keys(segmentUpdates).length === 0) {
+      return result;
+    }
+    const segments = result.segments.map((segment) =>
+      applySegmentUpdate(segment, segmentUpdates[segment.id]),
+    );
+    return { ...result, segments };
+  }, [result, segmentUpdates]);
+
+  const segmentIds = useMemo(
+    () => mergedResult.segments.map((s) => s.id),
+    [mergedResult.segments],
+  );
 
   useEffect(() => {
     function handler(event: KeyboardEvent) {
@@ -89,7 +132,7 @@ export function ResultView({ filename, file, result, onReset }: Props) {
           <div className="result-topbar-meta">
             <span className="mono">{filename}</span>
             <span>·</span>
-            <strong>{result.aggregate.total} segments</strong>
+            <strong>{mergedResult.aggregate.total} segments</strong>
           </div>
         </div>
         <div className="result-topbar-spacer" />
@@ -120,13 +163,17 @@ export function ResultView({ filename, file, result, onReset }: Props) {
         </div>
       </header>
 
-      {result.quality.overall !== "high" && (
-        <QualityBanner quality={result.quality} />
+      {mergedResult.quality.overall !== "high" && (
+        <QualityBanner quality={mergedResult.quality} />
+      )}
+
+      {reviewerStatus?.running && (
+        <ReviewerBanner status={reviewerStatus} />
       )}
 
       <div className="result-body">
         <Viewer
-          result={result}
+          result={mergedResult}
           file={file}
           selectedId={selectedId}
           grayscale={grayscale}
@@ -138,13 +185,56 @@ export function ResultView({ filename, file, result, onReset }: Props) {
         />
         {!sidebarCollapsed && (
           <Sidebar
-            result={result}
+            result={mergedResult}
             selectedId={selectedId}
             onSelect={handleSelect}
           />
         )}
       </div>
     </main>
+  );
+}
+
+/** Apply a reviewer's per-segment update onto the preliminary segment.
+ *
+ *  Merge rules — the reviewer is the authority on the fields it owns:
+ *    • verdict / iterations replace the defaults wholesale.
+ *    • pressure_class is replaced when the reviewer emitted one
+ *      (post-bump confidence band, V2 §5.6 confidence-ladder math).
+ *    • reasoning_trace is replaced with the reviewer's full trace —
+ *      the backend already prepended the pre-existing detect / OCR /
+ *      schedule steps before appending the reviewer_critique /
+ *      reviewer_refine entries, so we never need to splice.
+ *    • geometry / dimension / id are reviewer-untouched.
+ */
+function applySegmentUpdate(
+  segment: Segment,
+  update: SegmentReviewedPayload | undefined,
+): Segment {
+  if (!update) return segment;
+  return {
+    ...segment,
+    review_verdict: update.verdict,
+    review_iterations: update.iterations,
+    pressure_class: update.pressure_class ?? segment.pressure_class,
+    reasoning_trace: update.reasoning_trace.map((step) => ({
+      stage: step.stage,
+      evidence: step.evidence,
+      iteration: step.iteration ?? undefined,
+    })),
+  };
+}
+
+function ReviewerBanner({ status }: { status: ReviewerStatus }) {
+  const label =
+    status.total > 0
+      ? `Reviewer running… ${status.current} / ${status.total}`
+      : "Reviewer running…";
+  return (
+    <div className="reviewer-banner" role="status" aria-live="polite">
+      <span className="reviewer-banner-spinner" aria-hidden="true" />
+      <span className="reviewer-banner-label">{label}</span>
+    </div>
   );
 }
 
