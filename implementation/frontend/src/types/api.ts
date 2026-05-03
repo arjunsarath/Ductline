@@ -91,8 +91,12 @@ export interface DrawingResult {
    *   "pixels"     — raster (PNG/JPG/raster_pdf); geometry in pixel coords.
    */
   coord_space: "pdf_points" | "pixels";
-  /** Page size in PDF points; populated for vector inputs (V2 §6.2). */
+  /** Page size in PDF points; populated for vector inputs (V2 §6.2).
+   *  Reflects the page after any auto-rotation (W/H swap for 90/270). */
   page_size_pt?: [number, number] | null;
+  /** CW rotation baked into segment coords. Vector viewers must
+   *  re-apply this in PDF.js so the canvas matches the overlay. */
+  rotation_applied?: 0 | 90 | 180 | 270;
   /** Forward-compat: full PageLayout/Legend shapes land with PR-3/PR-4. */
   layout?: unknown;
   legend?: unknown;

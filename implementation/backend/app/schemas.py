@@ -135,4 +135,9 @@ class DrawingResult(_Frozen):
     aggregate: AggregateStats
     coord_space: Literal["pdf_points", "pixels"]
     page_size_pt: tuple[float, float] | None = None
+    # CW rotation baked into segment coords + page_size_pt. Vector PDF
+    # viewers must re-apply this when rendering the original File via
+    # PDF.js, otherwise the canvas shows un-rotated content while the
+    # overlay sits in rotated space.
+    rotation_applied: Literal[0, 90, 180, 270] = 0
     errors: list[str] = Field(default_factory=list)  # Per-stage degradations (§9)

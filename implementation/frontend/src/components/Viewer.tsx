@@ -34,7 +34,14 @@ export function Viewer(props: Props) {
     result.page_size_pt[0] > 0 &&
     result.page_size_pt[1] > 0
   ) {
-    return <PdfCanvas {...props} file={file} pageSizePt={result.page_size_pt} />;
+    return (
+      <PdfCanvas
+        {...props}
+        file={file}
+        pageSizePt={result.page_size_pt}
+        rotation={result.rotation_applied ?? 0}
+      />
+    );
   }
 
   return <RasterCanvas {...props} />;

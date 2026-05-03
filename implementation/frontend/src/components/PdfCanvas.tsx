@@ -41,6 +41,9 @@ if (!GlobalWorkerOptions.workerSrc) {
 interface Props {
   file: File;
   pageSizePt: [number, number];
+  /** CW rotation baked into segment coords. PDF.js must apply the same so
+   *  the canvas content matches the overlay's coordinate space. */
+  rotation: 0 | 90 | 180 | 270;
   result: DrawingResult;
   selectedId: string | null;
   grayscale: boolean;
@@ -54,6 +57,7 @@ interface Props {
 export function PdfCanvas({
   file,
   pageSizePt,
+  rotation,
   result,
   selectedId,
   grayscale,
@@ -73,6 +77,11 @@ export function PdfCanvas({
     null,
   );
   const [pdfReady, setPdfReady] = useState(false);
+  // Logical scale (PDF-points → CSS-pixels) the canvas was last rasterized at.
+  // Compared against the live viewport.scale to decide when to re-render at a
+  // higher DPI for lossless zoom-in.
+  const renderedScaleRef = useRef<number>(0);
+  const fitScaleRef = useRef<number>(1);
 
   const dragRef = useRef<{
     startX: number;
@@ -82,7 +91,59 @@ export function PdfCanvas({
   } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  // ── Load PDF + render page 1 once at a stage-fit DPI ─────────────────────
+  // Re-rasterize the page at ``logicalScale`` (PDF-pt → CSS-px). Keeps the
+  // canvas's CSS box at fit size (so layout / overlay alignment never moves)
+  // but pushes the internal pixel buffer up so zoom-in stays sharp.
+  const renderAtScale = useCallback(
+    async (logicalScale: number) => {
+      const page = pageRef.current;
+      const canvas = canvasRef.current;
+      if (!page || !canvas) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      // Cap the canvas to avoid OOM at extreme zooms. 16K px on the long edge
+      // covers ~10–12× zoom on a typical drawing without throwing.
+      const MAX_INTERNAL_PX = 16000;
+      const longEdgePt = Math.max(pageSizePt[0], pageSizePt[1]);
+      const maxLogicalScale = MAX_INTERNAL_PX / (longEdgePt * dpr);
+      const safeScale = Math.min(logicalScale, maxLogicalScale);
+
+      const viewportPdf = page.getViewport({
+        scale: safeScale * dpr,
+        rotation,
+      });
+      canvas.width = Math.round(viewportPdf.width);
+      canvas.height = Math.round(viewportPdf.height);
+      const cssW = Math.round(pageSizePt[0] * fitScaleRef.current);
+      const cssH = Math.round(pageSizePt[1] * fitScaleRef.current);
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      renderTaskRef.current?.cancel();
+      const task = page.render({
+        canvasContext: ctx,
+        canvas,
+        viewport: viewportPdf,
+      });
+      renderTaskRef.current = task;
+      try {
+        await task.promise;
+      } catch (err) {
+        if ((err as { name?: string })?.name !== "RenderingCancelledException") {
+          console.error("PdfCanvas render failed", err);
+        }
+        return;
+      }
+      renderedScaleRef.current = safeScale;
+      setCanvasSize({ w: cssW, h: cssH });
+    },
+    [pageSizePt, rotation],
+  );
+
+  // ── Load PDF + initial render at fit-to-stage DPI ────────────────────────
   useEffect(() => {
     let cancelled = false;
     setPdfReady(false);
@@ -103,9 +164,6 @@ export function PdfCanvas({
       if (cancelled) return;
       pageRef.current = page;
 
-      // Pick a base scale that fits the stage on first paint. Page units are
-      // PDF points (72 / inch); stage is in CSS pixels. We bias toward height
-      // since drawings are typically wider than the sidebar-narrowed stage.
       const stage = stageRef.current;
       const stageW = stage?.clientWidth ?? 1100;
       const stageH = stage?.clientHeight ?? 700;
@@ -113,42 +171,10 @@ export function PdfCanvas({
         stageW / pageSizePt[0],
         stageH / pageSizePt[1],
       );
-      // CSS-pixel viewport at fit; multiply by devicePixelRatio for sharp text.
-      const dpr = window.devicePixelRatio || 1;
-      const viewportPdf = page.getViewport({ scale: fitScale * dpr });
+      fitScaleRef.current = fitScale;
 
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      canvas.width = Math.round(viewportPdf.width);
-      canvas.height = Math.round(viewportPdf.height);
-      const cssW = Math.round(viewportPdf.width / dpr);
-      const cssH = Math.round(viewportPdf.height / dpr);
-      canvas.style.width = `${cssW}px`;
-      canvas.style.height = `${cssH}px`;
-
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      // Cancel any in-flight render before starting a new one.
-      renderTaskRef.current?.cancel();
-      const renderTask = page.render({
-        canvasContext: ctx,
-        canvas,
-        viewport: viewportPdf,
-      });
-      renderTaskRef.current = renderTask;
-
-      try {
-        await renderTask.promise;
-      } catch (err) {
-        // RenderingCancelledException is expected on rapid re-renders.
-        if ((err as { name?: string })?.name !== "RenderingCancelledException") {
-          console.error("PdfCanvas render failed", err);
-        }
-        return;
-      }
+      await renderAtScale(fitScale);
       if (cancelled) return;
-      setCanvasSize({ w: cssW, h: cssH });
       setPdfReady(true);
     })().catch((err: unknown) => {
       console.error("PdfCanvas load failed", err);
@@ -163,7 +189,22 @@ export function PdfCanvas({
       pageRef.current = null;
       doc?.destroy().catch(() => {});
     };
-  }, [file, pageSizePt]);
+  }, [file, pageSizePt, rotation, renderAtScale]);
+
+  // ── Re-rasterize on zoom-in for lossless rendering ───────────────────────
+  // viewport.scale is the CSS post-multiplier on top of the canvas's CSS box.
+  // Lossless when (canvas internal pixels) >= (on-screen pixels), i.e. when
+  // renderedScale >= fitScale * viewport.scale. We re-render with 30% headroom
+  // and a small debounce so a continuous zoom gesture only triggers one job.
+  useEffect(() => {
+    if (!pdfReady) return;
+    const required = fitScaleRef.current * Math.max(1, viewport.scale);
+    if (required <= renderedScaleRef.current * 1.05) return;
+    const timer = setTimeout(() => {
+      void renderAtScale(required * 1.3);
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [viewport.scale, pdfReady, renderAtScale]);
 
   // ── Wheel: zoom anchored to cursor ───────────────────────────────────────
   useEffect(() => {

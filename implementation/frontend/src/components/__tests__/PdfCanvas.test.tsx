@@ -51,6 +51,7 @@ function renderPdf(opts: {
       <PdfCanvas
         file={makeFile()}
         pageSizePt={[612, 792]}
+        rotation={0}
         result={result}
         selectedId={opts.selectedId ?? null}
         grayscale={false}

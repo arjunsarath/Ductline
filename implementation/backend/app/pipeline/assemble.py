@@ -58,6 +58,7 @@ def assemble_result(ctx: PipelineContext) -> DrawingResult:
         aggregate=aggregate,
         coord_space=coord_space,
         page_size_pt=ctx.source.page_size_pt,
+        rotation_applied=ctx.source.rotation_applied,
         errors=ctx.errors,
     )
 
