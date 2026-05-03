@@ -1,20 +1,22 @@
 /**
  * ApprovalPanel — renders an open HITL approval gate (V2 §5.8).
  *
- * Two gates today: ``categorize`` (after page categorization) and
- * ``tiling`` (after tile-grid computation, before the first VLM call).
+ * One gate today: ``categorize`` (after page categorization). The
+ * panel renders the layout rects (plan_view, legend, schedule,
+ * title_block, notes) as an INTERACTIVE editor over the page raster —
+ * drag handles to resize, drag rect interiors to move, click the X to
+ * delete, use "+ Add" toolbar buttons to draw new rects. Approve sends
+ * the (possibly edited) layout via the existing
+ * POST /api/detect/{id}/approve/categorize endpoint with corrections
+ * in the body; the pipeline applies them before legend_parse runs.
  *
- *  • categorize: layout rects (plan_view, legend, schedule, title_block,
- *    notes) rendered as an INTERACTIVE editor over the page raster — the
- *    user can drag handles to resize, drag rect interiors to move, click
- *    the X to delete, and use "+ Add" toolbar buttons to draw new rects.
- *    Approve sends the (possibly edited) layout via the existing
- *    POST /api/detect/{id}/approve/categorize endpoint with corrections
- *    in the body; the pipeline applies them before legend_parse runs.
- *
- *  • tiling: read-only stats panel (size, DPI, count, plan_view, est.
- *    cost). Editing tile geometry is not supported — the user approves
- *    or cancels the run.
+ * The ``tiling`` gate that used to pause between tile-grid compute and
+ * the first VLM call was removed: tile parameters are deterministic
+ * from probe_ocr + the plan_view the user already approved at this
+ * gate, so the pause asked for confirmation without offering an
+ * actionable choice. Cancel after approving categorize wasn't usable
+ * in practice either — the multi-minute tile loop would have to be
+ * dismissed via Chrome's tab-close, not a button.
  *
  * Why an editor and not yet-another-VLM-prompt: small-VLM bbox
  * extraction is unreliable. The right answer isn't more prompt
@@ -38,6 +40,10 @@ import {
   type TilingApprovalPayload,
 } from "../api/client";
 
+// Gate type retained as a discriminated union for forward-compat — if a
+// future feature adds another HITL pause we won't have to refactor this
+// surface. Today only "categorize" is rendered; "tiling" is kept in the
+// type so the SSE reducer / progress state can stay shape-stable.
 type Gate =
   | { gate: "categorize"; payload: CategorizeApprovalPayload }
   | { gate: "tiling"; payload: TilingApprovalPayload };
@@ -124,21 +130,21 @@ interface DrawState {
 }
 
 export function ApprovalPanel({ drawingId, gate }: Props) {
+  // The tiling gate was removed (see file-level docstring). If a stale
+  // gate event somehow arrives — or a future feature adds a non-
+  // categorize gate before its UI is built — render nothing so we
+  // don't block the run on a panel that has no interaction surface.
+  if (gate.gate !== "categorize") return null;
+
   return (
     <aside className="approval-panel" role="dialog" aria-label="Approval required">
       <header className="approval-panel-head">
         <span className="eyebrow">Awaiting your approval</span>
-        <h2 className="approval-panel-title">
-          {gate.gate === "categorize"
-            ? "Confirm page categorization"
-            : "Confirm tile grid"}
-        </h2>
+        <h2 className="approval-panel-title">Confirm page categorization</h2>
         <p className="approval-panel-sub">
-          {gate.gate === "categorize"
-            ? "Drag handles to resize, drag a rect to move, or click X to delete. Use the + buttons to add a missing region."
-            : "Review the tile grid + DPI before we send each tile to the model. ~10 s per tile."}
+          Drag handles to resize, drag a rect to move, or click X to delete. Use the + buttons to add a missing region.
         </p>
-        {gate.gate === "categorize" && gate.payload.rotation_applied !== 0 && (
+        {gate.payload.rotation_applied !== 0 && (
           <div className="approval-rotation-banner">
             <RotateBadge />
             <span>
@@ -150,33 +156,7 @@ export function ApprovalPanel({ drawingId, gate }: Props) {
         )}
       </header>
 
-      {gate.gate === "categorize" ? (
-        <CategorizeEditor drawingId={drawingId} payload={gate.payload} />
-      ) : (
-        <>
-          <TilingBody payload={gate.payload} />
-          <footer className="approval-panel-foot">
-            <button
-              type="button"
-              className="button button-ghost"
-              onClick={() => {
-                void cancelDetection(drawingId);
-              }}
-            >
-              Cancel run
-            </button>
-            <button
-              type="button"
-              className="button button-primary"
-              onClick={() => {
-                void approveGate(drawingId, "tiling");
-              }}
-            >
-              Approve tile plan
-            </button>
-          </footer>
-        </>
-      )}
+      <CategorizeEditor drawingId={drawingId} payload={gate.payload} />
     </aside>
   );
 }
@@ -417,7 +397,14 @@ function CategorizeEditor({
     setDrawMode(null);
   }, [original]);
 
-  const onApprove = useCallback(() => {
+  // Pending state for the approve / cancel buttons — once clicked we
+  // optimistically dim the panel so the user sees an immediate response,
+  // and if the POST fails we surface the error inline rather than
+  // silently swallowing it (the previous void-promise pattern).
+  const [submitting, setSubmitting] = useState<"approve" | "cancel" | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const onApprove = useCallback(async () => {
     const corrections: CategorizeCorrections = {
       layout: {
         plan_view: editLayout.plan_view,
@@ -427,8 +414,33 @@ function CategorizeEditor({
         notes: editLayout.notes,
       },
     };
-    void approveGate(drawingId, "categorize", corrections);
+    setSubmitting("approve");
+    setSubmitError(null);
+    try {
+      await approveGate(drawingId, "categorize", corrections);
+      // The reducer clears awaitingGate on the next stage_start event
+      // (legend_parse fires within ms of approve). The panel unmounts
+      // shortly after. We keep `submitting` set until then so the
+      // buttons stay disabled and the user can't double-submit.
+    } catch (err) {
+      setSubmitting(null);
+      setSubmitError(err instanceof Error ? err.message : "approve failed");
+    }
   }, [drawingId, editLayout]);
+
+  const onCancel = useCallback(async () => {
+    setSubmitting("cancel");
+    setSubmitError(null);
+    try {
+      await cancelDetection(drawingId);
+      // Backend cancels the session, SSE stream errors, App switches
+      // to the error view and unmounts ProcessingView entirely. Keep
+      // the buttons disabled in the meantime.
+    } catch (err) {
+      setSubmitting(null);
+      setSubmitError(err instanceof Error ? err.message : "cancel failed");
+    }
+  }, [drawingId]);
 
   if (!payload.raster_probe_data_url || sourceSize === null) {
     return (
@@ -436,24 +448,27 @@ function CategorizeEditor({
         <div className="approval-panel-empty">
           No categorizer output available — degraded run; approving will use whole-page fallback.
         </div>
+        {submitError && (
+          <div className="approval-submit-error" role="alert">
+            {submitError}
+          </div>
+        )}
         <footer className="approval-panel-foot">
           <button
             type="button"
             className="button button-ghost"
-            onClick={() => {
-              void cancelDetection(drawingId);
-            }}
+            onClick={onCancel}
+            disabled={submitting !== null}
           >
-            Cancel run
+            {submitting === "cancel" ? "Cancelling…" : "Cancel run"}
           </button>
           <button
             type="button"
             className="button button-primary"
-            onClick={() => {
-              void approveGate(drawingId, "categorize");
-            }}
+            onClick={onApprove}
+            disabled={submitting !== null}
           >
-            Approve categorization
+            {submitting === "approve" ? "Approving…" : "Approve categorization"}
           </button>
         </footer>
       </>
@@ -606,22 +621,27 @@ function CategorizeEditor({
           </button>
         </div>
       )}
+      {submitError && (
+        <div className="approval-submit-error" role="alert">
+          {submitError}
+        </div>
+      )}
       <footer className="approval-panel-foot">
         <button
           type="button"
           className="button button-ghost"
-          onClick={() => {
-            void cancelDetection(drawingId);
-          }}
+          onClick={onCancel}
+          disabled={submitting !== null}
         >
-          Cancel run
+          {submitting === "cancel" ? "Cancelling…" : "Cancel run"}
         </button>
         <button
           type="button"
           className="button button-primary"
           onClick={onApprove}
+          disabled={submitting !== null}
         >
-          Approve categorization
+          {submitting === "approve" ? "Approving…" : "Approve categorization"}
         </button>
       </footer>
     </>
@@ -923,40 +943,9 @@ function CategorizeLegend({ layout }: { layout: EditLayout }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tiling gate body — read-only stats panel (unchanged from v1 of HITL).
-// ─────────────────────────────────────────────────────────────────────────────
-
-function TilingBody({ payload }: { payload: TilingApprovalPayload }) {
-  return (
-    <div className="approval-tiling">
-      <dl className="approval-tiling-stats">
-        <div>
-          <dt>Tile size</dt>
-          <dd className="mono">{payload.tile_px}px @ {payload.dpi}DPI</dd>
-        </div>
-        <div>
-          <dt>Overlap</dt>
-          <dd className="mono">{Math.round(payload.overlap_pct * 100)}%</dd>
-        </div>
-        <div>
-          <dt>Tile count</dt>
-          <dd className="mono">{payload.tile_count}</dd>
-        </div>
-        <div>
-          <dt>Plan view rect</dt>
-          <dd className="mono approval-tiling-rect">
-            {payload.plan_view.map((v) => v.toFixed(0)).join(", ")}
-          </dd>
-        </div>
-        <div>
-          <dt>Estimated VLM time</dt>
-          <dd className="mono">~{Math.round(payload.tile_count * 10)}s ({payload.tile_count} × 10s)</dd>
-        </div>
-      </dl>
-    </div>
-  );
-}
+// (TilingBody was removed along with the tiling gate — see file-level
+// docstring. The TilingApprovalPayload type stays in client.ts so the
+// SSE event union is shape-stable, but no UI consumes it today.)
 
 function RotateBadge() {
   return (

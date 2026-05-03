@@ -152,41 +152,14 @@ class TiledDuctDetectionStage(PipelineStage):
             tiles[-1][4] if tiles else 0,
         )
 
-        # HITL gate: pause before any VLM call so the user can confirm the
-        # tile grid (size / DPI / count). Skipped on the test path
-        # (ctx.approval_gate is None). On timeout the run aborts with an
-        # empty draft list rather than silently calling 40+ VLM tiles.
-        if ctx.approval_gate is not None and tiles:
-            payload = {
-                "drawing_id": ctx.drawing_id,
-                "plan_view": list(plan_view),
-                "dpi": dpi,
-                "tile_px": self._tile_px,
-                "overlap_pct": self._overlap_pct,
-                "tile_count": len(tiles),
-                "tiles": [
-                    {
-                        "rect": list(tile_rect),
-                        "row": row,
-                        "col": col,
-                        "total_rows": total_rows,
-                        "total_cols": total_cols,
-                    }
-                    for tile_rect, row, col, total_rows, total_cols in tiles
-                ],
-            }
-            # Tiling gate has no inline-correction UI; the dict body is
-            # ignored on approval. ``None`` means timeout / cancel — abort
-            # the tile loop with an error rather than silently continuing.
-            # An empty corrections dict still counts as approval, so the
-            # check explicitly compares to None rather than relying on
-            # truthiness (an empty dict is falsy).
-            if ctx.approval_gate("tiling", payload) is None:
-                logger.warning(
-                    "tiled_detect: tiling gate timed out; aborting tile loop"
-                )
-                ctx.errors.append("approval timeout: tiling gate not approved")
-                return []
+        # NB: there used to be an HITL "tiling" gate here that paused the
+        # pipeline and asked the user to confirm tile_count / DPI / cost.
+        # Removed — the gate offered no actionable choice (tile parameters
+        # are deterministic from the plan_view the user already approved at
+        # the categorize gate), and the long delay between approval and the
+        # first stage_start event meant the SSE-driven gate-dismiss
+        # heuristic on the frontend kept the panel visible for the full
+        # multi-minute tile loop. Categorize remains the only HITL pause.
 
         # Per-tile call. We track results in tile order so trail context is
         # built from already-processed neighbours; see _build_trail_context.

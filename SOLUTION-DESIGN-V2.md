@@ -299,18 +299,28 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
   actually received — the rendered crops at the per-tile DPI may have been too small
   for the model to read duct callouts. Without empirical visibility, every fix was
   speculative.
-- **Change:** the pipeline now pauses at two human-in-the-loop (HITL) approval gates,
+- **Change:** the pipeline pauses at one human-in-the-loop (HITL) approval gate,
   and the processing UI shows each tile rendered at 100% as it's sent to the VLM.
-  - **Gate 1 — `categorize`** fires after `page_categorize` and before
-    `legend_parse`. The frontend overlay shows the categorizer's `plan_view`,
-    `legend`, `schedule`, `title_block`, and `notes` rects on top of the page
-    raster. The user clicks **Approve** to continue (current behaviour) or
-    **Cancel** to abort the run (new — surfaces a clean "this drawing isn't
-    going to work" exit).
-  - **Gate 2 — `tiling`** fires inside `duct_detect_tiled` after the tile grid
-    has been computed but before the first VLM call. Shows tile size, DPI,
-    overlap %, tile count, and an estimated wall-clock cost. User approves or
-    cancels.
+  - **`categorize` gate** fires after `page_categorize` and before
+    `legend_parse`. The frontend renders the categorizer's `plan_view`,
+    `legend`, `schedule`, `title_block`, and `notes` rects as an
+    INTERACTIVE overlay on the page raster — drag handles to resize,
+    drag the rect interior to move, X to delete, "+ Add" toolbar
+    buttons to draw missing regions, wheel/buttons to zoom. **Approve**
+    sends the (possibly edited) layout via the existing
+    `POST /api/detect/:id/approve/categorize` endpoint with corrections
+    in the body; the runner applies them before `legend_parse` runs.
+    **Cancel** aborts the run cleanly. This is the only HITL pause in
+    the v2 pipeline.
+  - **(removed) `tiling` gate.** An earlier revision paused again
+    inside `duct_detect_tiled` after the tile grid was computed,
+    showing tile size / DPI / overlap / count / estimated cost.
+    Removed: tile parameters are deterministic from probe_ocr +
+    plan_view (already approved at the categorize gate), so the pause
+    asked for confirmation without offering an actionable choice. The
+    long delay between approve and the next stage_start event also
+    broke the SSE-driven gate-dismiss heuristic on the frontend — the
+    panel hung visible for the full multi-minute tile loop.
   - **Live tile preview** is a sidebar panel that updates as each tile starts
     processing. The frontend renders the tile rect from the original `File` via
     PDF.js at the per-tile DPI — visually identical to the model's input. After
@@ -345,12 +355,10 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
    ↓ emit awaiting_categorize_approval { layout, raster_probe_data_url }
    ↓ session.wait_for_approval("categorize")  ← BLOCKS
                                           ← [client] POST /detect/:id/approve/categorize
-   ↓ resume: legend_parse → quality → region_detect →
-     [duct_detect_tiled: compute tiles]
-   ↓ emit awaiting_tiling_approval { tile_count, dpi, tile_rects }
-   ↓ session.wait_for_approval("tiling")     ← BLOCKS
-                                          ← [client] POST /detect/:id/approve/tiling
-   ↓ resume: per-tile loop:
+                                              { layout: <edited PageLayout> }
+   ↓ apply layout corrections to ctx.layout
+   ↓ resume: legend_parse → quality → region_detect → duct_detect_tiled
+   ↓ per-tile loop:
         emit tile_start (frontend renders the tile crop at 100%)
         VLM call
         emit tile_done { segments_found } (frontend updates count)

@@ -875,6 +875,15 @@ a {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+.approval-submit-error {
+  flex-shrink: 0;
+  padding: 12px 32px;
+  border-top: 1px solid var(--pc-high, #dc2626);
+  background: var(--pc-high-bg, #fef2f2);
+  color: var(--pc-high, #dc2626);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
 .draw-mode-banner {
   display: flex;
   align-items: center;
