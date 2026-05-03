@@ -12,16 +12,22 @@
 
 import type { ProgressEvent } from "../api/client";
 
-/** v2 pipeline stage list, in execution order. Mirrors runner.py. */
+/** v2 pipeline stage list, in execution order.
+ *
+ * Names mirror the backend stage `.name` attributes EXACTLY (see
+ * implementation/backend/app/pipeline/*.py — `region_detect` not `regions`,
+ * `text_extraction` not `text_extract`). A mismatch silently drops events:
+ * the UI keeps showing pending while the backend completes the stage.
+ */
 export const STAGE_ORDER = [
   "ingest",
   "probe_ocr",
   "page_categorize",
   "legend_parse",
   "quality",
-  "regions",
+  "region_detect",
   "duct_detect_tiled",
-  "text_extract",
+  "text_extraction",
   "pressure_class",
   "review",
 ] as const;
@@ -60,9 +66,9 @@ const STAGE_LABEL: Record<StageName, string> = {
   page_categorize: "Page categorizer",
   legend_parse: "Legend parser",
   quality: "Quality check",
-  regions: "Region detect (v1)",
+  region_detect: "Region detect (v1)",
   duct_detect_tiled: "Tiled duct detection",
-  text_extract: "Text extraction",
+  text_extraction: "Text extraction",
   pressure_class: "Pressure class",
   review: "MEP reviewer",
 };

@@ -35,9 +35,9 @@ const STAGE_TAGS: Record<StageName, Array<"ALG" | "WF" | "AGT">> = {
   page_categorize: ["ALG", "AGT"],
   legend_parse: ["ALG", "AGT"],
   quality: ["ALG"],
-  regions: ["ALG"],
+  region_detect: ["ALG"],
   duct_detect_tiled: ["AGT", "ALG"],
-  text_extract: ["ALG"],
+  text_extraction: ["ALG"],
   pressure_class: ["WF"],
   review: ["AGT", "WF"],
 };
@@ -48,9 +48,9 @@ const STAGE_DETAIL: Record<StageName, string> = {
   page_categorize: "Hough decomposition · keyword classification · VLM fallback",
   legend_parse: "OCR rows + glyph fallback · drawing-specific legend",
   quality: "Laplacian variance · projection skew · OCR sample",
-  regions: "title block + duct schedule (v1 detector)",
+  region_detect: "title block + duct schedule (v1 detector)",
   duct_detect_tiled: "tile @ 1100 px · trail context · stitch in source space",
-  text_extract: "RapidOCR over segments + schedule grammar",
+  text_extraction: "RapidOCR over segments + schedule grammar",
   pressure_class: "4-tier ranked policy state machine",
   review: "per-segment verdict · refine if implausible · max 2 iters",
 };
