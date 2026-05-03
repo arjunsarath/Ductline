@@ -70,10 +70,23 @@ _WORDLIKE_ALPHA_RATIO = 0.6
 # we treat the result as ambiguous and don't rotate.
 _DIRECTION_MARGIN = 1.3
 
-# Low DPI for direction-resolution renders. The OCR pass only needs
-# enough resolution to recognise a few dozen words; 90 DPI is cheap and
-# adequate on engineering drawings.
-_DIRECTION_PROBE_DPI = 90
+# Tie-break threshold for the canonical-dominated rule: if the rot=0
+# (canonical) candidate scored 5× worse than the best rotated one, the
+# drawing is clearly rotated even when 90 vs 270 are close. Prevents the
+# fail-open path from mis-classifying a sparse-text rotated drawing as
+# "not rotated" just because both rotations look similar to OCR.
+_CANONICAL_DOMINATED_RATIO = 5.0
+
+# DPI for direction-resolution renders. We initially set this at 90 DPI
+# (cheap), but on text-sparse engineering drawings (drawing 01 in the
+# benchmark set: only 20 text-layer spans, mostly tiny callouts) RapidOCR
+# finds at most 1 match per candidate at that resolution — every rotation
+# ties at one match and the function correctly fails open with rotation=0.
+# 150 DPI matches the standard probe DPI for the rest of the pipeline; it
+# costs ~3-4 OCR seconds extra per direction-resolution attempt but
+# produces enough recognisable words to clear the 1.3× margin on every
+# benchmark drawing.
+_DIRECTION_PROBE_DPI = 150
 
 
 Rotation = Literal[0, 90, 180, 270]
@@ -196,6 +209,35 @@ def resolve_rotation_direction(
 
     if scores[winner] >= runner_up_score * _DIRECTION_MARGIN:
         return _as_rotation(winner)
+
+    # Tight-margin tie-break: if the canonical (rot=0) candidate scored
+    # dramatically worse than the winner, the drawing IS rotated even
+    # if 90 vs 270 is close. Pick the best non-zero candidate rather
+    # than failing open to "no rotation" — leaving such a drawing
+    # un-rotated guarantees the wrong answer (0 already known to lose),
+    # while picking the higher-scored rotated candidate at least has
+    # a 50% baseline chance and matches the OCR-evidence direction.
+    canonical_score = scores.get(0, 0)
+    best_rotated = max(
+        (s for r, s in scores.items() if r != 0),
+        default=0,
+    )
+    if (
+        canonical_score < best_rotated / _CANONICAL_DOMINATED_RATIO
+        and best_rotated > 0
+    ):
+        rotated_winner = max(
+            (r for r in scores if r != 0),
+            key=lambda r: scores[r],
+        )
+        logger.info(
+            "orientation: tie within margin but canonical=%d <<%d × best=%d → %d",
+            canonical_score,
+            _CANONICAL_DOMINATED_RATIO,
+            best_rotated,
+            rotated_winner,
+        )
+        return _as_rotation(rotated_winner)
 
     logger.info(
         "orientation: direction-resolution within margin (%.2fx) — fail open",

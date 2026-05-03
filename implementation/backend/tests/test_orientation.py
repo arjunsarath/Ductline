@@ -241,9 +241,52 @@ def test_resolves_to_zero_on_close_tie() -> None:
     base.rotate = fake_rotate  # type: ignore[method-assign]
 
     ocr = _DirectionalFakeOCR()
-    ocr.register(base, _word_matches(["12"]))
-    # 90 and 270 within 1.3× of each other — neither dominates.
+    # Canonical has real word-like matches too — close enough to the
+    # rotated candidates that the canonical-dominated rule doesn't
+    # kick in (canonical=2, best=3, ratio is 1.5× < 5×). 90 and 270
+    # also tie within 1.3× margin → fail-open path returns 0.
+    ocr.register(base, _word_matches(["LEGEND", "OFFICE"]))
     ocr.register(img_90, _word_matches(["DUCT", "SCHEDULE", "PROJECT"]))
-    ocr.register(img_270, _word_matches(["LEGEND", "OFFICE", "PLAN"]))
+    ocr.register(img_270, _word_matches(["NOTES", "PLAN", "TITLE"]))
 
     assert resolve_rotation_direction(base, ocr, [0, 90, 270]) == 0
+
+
+def test_canonical_dominated_picks_best_rotated_on_tight_margin() -> None:
+    """When canonical (rot=0) clearly loses but 90 vs 270 are close,
+    pick the higher-scored rotation rather than failing open.
+
+    This is the drawing-01 case in the benchmark: scores were
+    {0:1, 90:25, 270:26}. Within the 1.3× margin (270/25 = 1.04×) but
+    canonical (1) is 25× smaller than the best rotated (26) — clearly
+    rotated, just unclear which way. The rule picks 270 (the winner)
+    so the drawing isn't left un-rotated when no-rotation is the
+    worst possible answer.
+    """
+    base = Image.new("RGB", (10, 10), (255, 255, 255))
+    img_90 = Image.new("RGB", (10, 10), (200, 200, 200))
+    img_270 = Image.new("RGB", (10, 10), (100, 100, 100))
+
+    def fake_rotate(angle: int, expand: bool = False) -> Image.Image:
+        del expand
+        return img_90 if angle == -90 else img_270
+
+    base.rotate = fake_rotate  # type: ignore[method-assign]
+
+    ocr = _DirectionalFakeOCR()
+    # canonical: 0 word-like matches (numeric only, filtered out).
+    ocr.register(base, _word_matches(["12"]))
+    # 90 vs 270 within margin (10 vs 12 = 1.2×) — but both dwarf canonical.
+    ocr.register(
+        img_90,
+        _word_matches(["DUCT", "GRILLE", "SUPPLY", "RETURN", "PLENUM",
+                       "EXHAUST", "RIGID", "FLEX", "INTAKE", "OFFSET"]),
+    )
+    ocr.register(
+        img_270,
+        _word_matches(["DUCT", "GRILLE", "SUPPLY", "RETURN", "PLENUM",
+                       "EXHAUST", "RIGID", "FLEX", "INTAKE", "OFFSET",
+                       "DAMPER", "RISER"]),
+    )
+
+    assert resolve_rotation_direction(base, ocr, [0, 90, 270]) == 270
