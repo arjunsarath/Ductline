@@ -32,6 +32,7 @@ from app.pipeline.regions import RegionDetectStage
 from app.pipeline.review import ReviewerStage
 from app.schemas import DrawingResult
 from app.source.base import RectPt
+from app.source.encode import raster_probe_data_url
 from app.vlm.base import VLMClient
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,9 @@ def _serialise_layout_for_approval(ctx: PipelineContext) -> dict:
             list(ctx.source.raster_probe.size) if ctx.source is not None else None
         ),
         "raster_probe_data_url": (
-            _raster_probe_data_url(ctx) if ctx.source is not None else None
+            raster_probe_data_url(ctx.source.raster_probe)
+            if ctx.source is not None
+            else None
         ),
         "rotation_applied": (
             ctx.source.rotation_applied if ctx.source is not None else 0
@@ -199,29 +202,6 @@ def _serialise_layout_for_approval(ctx: PipelineContext) -> dict:
         } if layout is not None else None,
         "errors": list(ctx.errors),
     }
-
-
-def _raster_probe_data_url(ctx: PipelineContext) -> str:
-    """Encode ctx.source.raster_probe as a downscaled PNG data URL.
-
-    Reuses assemble.py's display-size cap so the SSE payload stays modest
-    even for high-DPI inputs.
-    """
-    import base64
-    from io import BytesIO
-
-    assert ctx.source is not None
-    image = ctx.source.raster_probe
-    long_edge = max(image.size)
-    max_edge = 1600  # matches assemble's _DISPLAY_MAX_LONG_EDGE_PX class
-    if long_edge > max_edge:
-        scale = max_edge / long_edge
-        new_size = (int(image.width * scale), int(image.height * scale))
-        image = image.resize(new_size)
-    buf = BytesIO()
-    image.save(buf, format="PNG", optimize=True)
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
 
 
 # Fields on PageLayout that the categorize approval gate is allowed to

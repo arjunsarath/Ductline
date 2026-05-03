@@ -193,6 +193,14 @@ export function applyProgressEvent(
 
     case "tile_start":
     case "tile_done": {
+      // tile_start is the unambiguous "we're past the tiling gate" signal.
+      // duct_detect_tiled is one stage that wraps the entire ~4-min tile
+      // loop, so no stage_start fires between approve and the first VLM
+      // call — without this the approval panel hangs visible until the
+      // run completes. (V2 §5.8 follow-up.)
+      if (event.event === "tile_start") {
+        next.awaitingGate = null;
+      }
       const stage = next.stages.duct_detect_tiled;
       const totalTiles = (event as { total?: number }).total ?? 0;
       const current = (event as { current?: number }).current ?? 0;

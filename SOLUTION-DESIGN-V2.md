@@ -299,7 +299,7 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
   actually received — the rendered crops at the per-tile DPI may have been too small
   for the model to read duct callouts. Without empirical visibility, every fix was
   speculative.
-- **Change:** the pipeline pauses at one human-in-the-loop (HITL) approval gate,
+- **Change:** the pipeline pauses at two human-in-the-loop (HITL) approval gates,
   and the processing UI shows each tile rendered at 100% as it's sent to the VLM.
   - **`categorize` gate** fires after `page_categorize` and before
     `legend_parse`. The frontend renders the categorizer's `plan_view`,
@@ -310,17 +310,33 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
     sends the (possibly edited) layout via the existing
     `POST /api/detect/:id/approve/categorize` endpoint with corrections
     in the body; the runner applies them before `legend_parse` runs.
-    **Cancel** aborts the run cleanly. This is the only HITL pause in
-    the v2 pipeline.
-  - **(removed) `tiling` gate.** An earlier revision paused again
-    inside `duct_detect_tiled` after the tile grid was computed,
-    showing tile size / DPI / overlap / count / estimated cost.
-    Removed: tile parameters are deterministic from probe_ocr +
-    plan_view (already approved at the categorize gate), so the pause
-    asked for confirmation without offering an actionable choice. The
-    long delay between approve and the next stage_start event also
-    broke the SSE-driven gate-dismiss heuristic on the frontend — the
-    panel hung visible for the full multi-minute tile loop.
+    **Cancel** aborts the run cleanly.
+  - **`tiling` gate** fires inside `duct_detect_tiled` after the tile
+    grid is computed but before the per-tile VLM loop. The frontend
+    renders the tile rects as an SVG overlay on the page raster (one
+    translucent rectangle per tile, labelled `(row, col)`) and exposes
+    `tile_px` and `overlap_pct` as adjustable controls — a number
+    input and a slider — that recompute the grid live as the user
+    drags. DPI is read-only (it's derived from probe_ocr's smallest-
+    text measurement; the user doesn't have the data to second-guess
+    it). **Approve** sends `{ tile_px, overlap_pct }` to
+    `POST /api/detect/:id/approve/tiling`; the stage clamps to
+    defensible ranges (`tile_px ∈ [600, 2000]`,
+    `overlap_pct ∈ [0.05, 0.40]`), recomputes the tile grid with the
+    new values, and runs the tile loop. An empty corrections body
+    keeps the stage defaults.
+    - **History.** An earlier revision (4e231aa) used a read-only
+      stats panel here that showed tile size / DPI / overlap / count
+      / estimated cost. Removed for offering no actionable choice — if
+      the user can only "approve or cancel", the gate is just a
+      confirmation prompt, and the long delay between approve and the
+      first `stage_start` event meant the SSE-driven gate-dismiss
+      heuristic on the frontend kept the panel visible for the full
+      multi-minute tile loop. This revision restores the gate as an
+      editable surface with a live tile-grid preview, which makes the
+      choice actionable; the reducer also latches gate-dismiss off the
+      next `tile_start` event so the panel closes the moment the loop
+      starts.
   - **Live tile preview** is a sidebar panel that updates as each tile starts
     processing. The frontend renders the tile rect from the original `File` via
     PDF.js at the per-tile DPI — visually identical to the model's input. After
@@ -358,8 +374,15 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
                                               { layout: <edited PageLayout> }
    ↓ apply layout corrections to ctx.layout
    ↓ resume: legend_parse → quality → region_detect → duct_detect_tiled
+   ↓ compute tile grid from plan_view + dpi + tile_px + overlap_pct
+   ↓ emit awaiting_tiling_approval { plan_view, dpi, tile_px,
+                                     overlap_pct, tiles[], raster_probe_data_url }
+   ↓ session.wait_for_approval("tiling")  ← BLOCKS
+                                          ← [client] POST /detect/:id/approve/tiling
+                                              { tile_px, overlap_pct }
+   ↓ clamp + apply tiling corrections, recompute tile grid
    ↓ per-tile loop:
-        emit tile_start (frontend renders the tile crop at 100%)
+        emit tile_start (frontend dismisses gate, renders the tile crop at 100%)
         VLM call
         emit tile_done { segments_found } (frontend updates count)
    ↓ text_extract → pressure_class → review → assemble

@@ -22,7 +22,10 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApprovalPanel } from "../ApprovalPanel";
-import type { CategorizeApprovalPayload } from "../../api/client";
+import type {
+  CategorizeApprovalPayload,
+  TilingApprovalPayload,
+} from "../../api/client";
 
 vi.mock("../../api/client", () => ({
   approveGate: vi.fn().mockResolvedValue(undefined),
@@ -201,5 +204,72 @@ describe("ApprovalPanel categorize editor", () => {
     expect(legendRect!.getAttribute("height")).toBe("260");
     // Draw-mode banner cleared after the rect committed.
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tiling approval-gate editor (V2 §5.8 follow-up)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function tilingPayload(): TilingApprovalPayload {
+  // 4000 × 3000 px raster plan_view at 1100 px tiles / 15% overlap.
+  // computeTiles produces a 4×3 grid (12 tiles) at the initial values;
+  // shrinking the tile size to 700 produces a denser grid so the test
+  // can assert the count actually changed.
+  return {
+    drawing_id: "test-drw",
+    coord_space: "pixels",
+    source_size: [4000, 3000],
+    raster_probe_data_url: "data:image/png;base64,iVBORw0KGgo=",
+    plan_view: [0, 0, 4000, 3000],
+    dpi: 200,
+    tile_px: 1100,
+    overlap_pct: 0.15,
+    tile_count: 12,
+    tiles: [],
+  };
+}
+
+describe("ApprovalPanel tiling editor", () => {
+  beforeEach(() => {
+    stubSvgGeometry();
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("recomputes the tile grid when tile_px changes", () => {
+    const { container } = render(
+      <ApprovalPanel
+        drawingId={drawingId}
+        gate={{ gate: "tiling", payload: tilingPayload() }}
+      />,
+    );
+
+    const tilesBefore = container.querySelectorAll(
+      "g[data-tile-row][data-tile-col]",
+    );
+    const initialCount = tilesBefore.length;
+    expect(initialCount).toBeGreaterThan(0);
+
+    const tileCountReadout = container.querySelector(
+      'dd[data-readonly="tile-count"]',
+    );
+    expect(tileCountReadout).not.toBeNull();
+    expect(tileCountReadout!.textContent).toBe(String(initialCount));
+
+    // Shrink tile_px from 1100 → 700; the smaller tiles must produce
+    // strictly more tiles for the same plan_view + overlap.
+    const tilePxInput = container.querySelector(
+      'input[data-control="tile-px"]',
+    ) as HTMLInputElement | null;
+    expect(tilePxInput).not.toBeNull();
+    fireEvent.change(tilePxInput!, { target: { value: "700" } });
+
+    const tilesAfter = container.querySelectorAll(
+      "g[data-tile-row][data-tile-col]",
+    );
+    expect(tilesAfter.length).toBeGreaterThan(initialCount);
+    expect(tileCountReadout!.textContent).toBe(String(tilesAfter.length));
   });
 });

@@ -34,11 +34,25 @@ export interface CategorizeApprovalPayload {
 
 export interface TilingApprovalPayload {
   drawing_id: string;
+  /** Coordinate system the ``plan_view`` and tile rects are expressed in.
+   *  ``pdf_points`` for vector PDFs, ``pixels`` for raster sources. The
+   *  frontend renders the SVG viewBox in this same space so no conversion
+   *  is needed. */
+  coord_space: "pdf_points" | "pixels";
+  /** Source-pixel dimensions of the raster_probe encoded in
+   *  ``raster_probe_data_url`` — the image is downscaled for transport
+   *  but the SVG renders at logical source size, so the viewBox is sized
+   *  off this rather than the encoded image's pixel dimensions. */
+  source_size: [number, number];
+  raster_probe_data_url: string;
   plan_view: [number, number, number, number];
   dpi: number;
   tile_px: number;
   overlap_pct: number;
   tile_count: number;
+  /** Initial server-computed tile rects. The frontend recomputes these
+   *  client-side as the user adjusts ``tile_px`` / ``overlap_pct`` in the
+   *  editor — this list is only the at-event-time snapshot. */
   tiles: Array<{
     rect: [number, number, number, number];
     row: number;
@@ -234,17 +248,31 @@ export interface CategorizeCorrections {
   };
 }
 
+/** Inline-correction payload for the tiling approval gate (V2 §5.8).
+ *
+ *  Both fields optional — a missing key leaves the stage's default in
+ *  place. The backend clamps out-of-range values rather than rejecting
+ *  them (see ``_apply_tiling_corrections`` in detect_tiled.py): the
+ *  frontend's slider already enforces the same ranges so an in-bounds
+ *  value travels through unchanged.
+ *    • tile_px:    [600, 2000] — pixel side length of each tile.
+ *    • overlap_pct:[0.05, 0.40] — overlap as a fraction of tile size.
+ */
+export interface TilingCorrections {
+  tile_px?: number;
+  overlap_pct?: number;
+}
+
 /** Release a HITL approval gate. Resolves with the server's ack on 200,
  *  rejects on any non-2xx (including 404 — session already finished).
  *
- *  ``corrections`` is optional and only meaningful for the categorize
- *  gate today. When provided it's sent as the JSON request body; the
- *  runner reads it and rewrites ``ctx.layout`` before legend_parse
- *  runs. The tiling gate ignores any body. */
+ *  ``corrections`` is optional and gate-specific. For ``categorize`` the
+ *  payload is the edited layout; for ``tiling`` it's
+ *  ``{ tile_px, overlap_pct }``. An empty body keeps the stage defaults. */
 export async function approveGate(
   drawingId: string,
   gate: "categorize" | "tiling",
-  corrections?: CategorizeCorrections,
+  corrections?: CategorizeCorrections | TilingCorrections,
 ): Promise<void> {
   const body = corrections === undefined ? "{}" : JSON.stringify(corrections);
   const response = await fetch(

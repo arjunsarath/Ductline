@@ -1,22 +1,29 @@
 /**
  * ApprovalPanel — renders an open HITL approval gate (V2 §5.8).
  *
- * One gate today: ``categorize`` (after page categorization). The
- * panel renders the layout rects (plan_view, legend, schedule,
- * title_block, notes) as an INTERACTIVE editor over the page raster —
- * drag handles to resize, drag rect interiors to move, click the X to
- * delete, use "+ Add" toolbar buttons to draw new rects. Approve sends
- * the (possibly edited) layout via the existing
- * POST /api/detect/{id}/approve/categorize endpoint with corrections
- * in the body; the pipeline applies them before legend_parse runs.
+ * Two gates today:
+ *   • ``categorize`` (after page categorization). The panel renders the
+ *     layout rects (plan_view, legend, schedule, title_block, notes) as
+ *     an INTERACTIVE editor over the page raster — drag handles to
+ *     resize, drag rect interiors to move, click the X to delete, use
+ *     "+ Add" toolbar buttons to draw new rects.
+ *   • ``tiling`` (after the tile grid is computed, before the per-tile
+ *     VLM loop). The panel shows the tile rects overlaid on the page
+ *     raster and lets the user adjust ``tile_px`` and ``overlap_pct``
+ *     with a live preview. DPI is read-only — it's derived from
+ *     probe_ocr's smallest-text measurement and exposing it as a knob
+ *     would let the user override a measurement they don't have the
+ *     data to second-guess.
  *
- * The ``tiling`` gate that used to pause between tile-grid compute and
- * the first VLM call was removed: tile parameters are deterministic
- * from probe_ocr + the plan_view the user already approved at this
- * gate, so the pause asked for confirmation without offering an
- * actionable choice. Cancel after approving categorize wasn't usable
- * in practice either — the multi-minute tile loop would have to be
- * dismissed via Chrome's tab-close, not a button.
+ * Approve in either case sends the (possibly empty) corrections via
+ * POST /api/detect/{id}/approve/{gate}; the pipeline applies them
+ * before continuing.
+ *
+ * The tiling gate was removed in 4e231aa because the previous read-
+ * only stats panel offered no actionable choice. This revision restores
+ * it as an editable surface — the actionable choice is "is the tile
+ * grid going to read the duct callouts cleanly", and ``tile_px`` /
+ * ``overlap_pct`` are the levers that answer it.
  *
  * Why an editor and not yet-another-VLM-prompt: small-VLM bbox
  * extraction is unreliable. The right answer isn't more prompt
@@ -38,12 +45,9 @@ import {
   type CategorizeApprovalPayload,
   type CategorizeCorrections,
   type TilingApprovalPayload,
+  type TilingCorrections,
 } from "../api/client";
 
-// Gate type retained as a discriminated union for forward-compat — if a
-// future feature adds another HITL pause we won't have to refactor this
-// surface. Today only "categorize" is rendered; "tiling" is kept in the
-// type so the SSE reducer / progress state can stay shape-stable.
 type Gate =
   | { gate: "categorize"; payload: CategorizeApprovalPayload }
   | { gate: "tiling"; payload: TilingApprovalPayload };
@@ -130,33 +134,43 @@ interface DrawState {
 }
 
 export function ApprovalPanel({ drawingId, gate }: Props) {
-  // The tiling gate was removed (see file-level docstring). If a stale
-  // gate event somehow arrives — or a future feature adds a non-
-  // categorize gate before its UI is built — render nothing so we
-  // don't block the run on a panel that has no interaction surface.
-  if (gate.gate !== "categorize") return null;
+  if (gate.gate === "categorize") {
+    return (
+      <aside className="approval-panel" role="dialog" aria-label="Approval required">
+        <header className="approval-panel-head">
+          <span className="eyebrow">Awaiting your approval</span>
+          <h2 className="approval-panel-title">Confirm page categorization</h2>
+          <p className="approval-panel-sub">
+            Drag handles to resize, drag a rect to move, or click X to delete. Use the + buttons to add a missing region.
+          </p>
+          {gate.payload.rotation_applied !== 0 && (
+            <div className="approval-rotation-banner">
+              <RotateBadge />
+              <span>
+                Auto-rotated <strong>{gate.payload.rotation_applied}° CW</strong> at ingest —
+                source content was landscape inside a portrait page. Cancel if the rotated
+                preview below looks wrong.
+              </span>
+            </div>
+          )}
+        </header>
+
+        <CategorizeEditor drawingId={drawingId} payload={gate.payload} />
+      </aside>
+    );
+  }
 
   return (
     <aside className="approval-panel" role="dialog" aria-label="Approval required">
       <header className="approval-panel-head">
         <span className="eyebrow">Awaiting your approval</span>
-        <h2 className="approval-panel-title">Confirm page categorization</h2>
+        <h2 className="approval-panel-title">Confirm tile grid</h2>
         <p className="approval-panel-sub">
-          Drag handles to resize, drag a rect to move, or click X to delete. Use the + buttons to add a missing region.
+          The plan view will be cropped into the tiles below and each tile sent to the VLM. Adjust tile size or overlap to change the grid; smaller tiles read finer detail at the cost of more inference calls.
         </p>
-        {gate.payload.rotation_applied !== 0 && (
-          <div className="approval-rotation-banner">
-            <RotateBadge />
-            <span>
-              Auto-rotated <strong>{gate.payload.rotation_applied}° CW</strong> at ingest —
-              source content was landscape inside a portrait page. Cancel if the rotated
-              preview below looks wrong.
-            </span>
-          </div>
-        )}
       </header>
 
-      <CategorizeEditor drawingId={drawingId} payload={gate.payload} />
+      <TilingEditor drawingId={drawingId} payload={gate.payload} />
     </aside>
   );
 }
@@ -943,9 +957,387 @@ function CategorizeLegend({ layout }: { layout: EditLayout }) {
   );
 }
 
-// (TilingBody was removed along with the tiling gate — see file-level
-// docstring. The TilingApprovalPayload type stays in client.ts so the
-// SSE event union is shape-stable, but no UI consumes it today.)
+// ─────────────────────────────────────────────────────────────────────────────
+// TILING — adjustable tile grid editor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Clamp ranges mirror the backend's ``_apply_tiling_corrections``. The
+ *  slider/number-input inputs already enforce these so the typical path
+ *  sends in-range values; the backend clamps defensively if anything
+ *  slips through. */
+const TILE_PX_MIN = 600;
+const TILE_PX_MAX = 2000;
+const TILE_PX_STEP = 50;
+const OVERLAP_MIN = 0.05;
+const OVERLAP_MAX = 0.40;
+const OVERLAP_STEP = 0.01;
+/** Rough wall-clock estimate per tile (VLM call) — used only for the
+ *  "estimated time" readout in the side panel. Real calls vary 5–25 s
+ *  on cloud Ollama; 10 s is the median we've observed on benchmark 01. */
+const SECONDS_PER_TILE = 10;
+
+interface TileRect {
+  rect: [number, number, number, number];
+  row: number;
+  col: number;
+  totalRows: number;
+  totalCols: number;
+}
+
+/** TS port of the backend's ``_compute_tiles`` math. Same algorithm,
+ *  same row-major traversal order — kept in sync so the live preview
+ *  matches what the pipeline will actually iterate over. */
+function computeTiles(
+  planView: [number, number, number, number],
+  coordSpace: "pdf_points" | "pixels",
+  dpi: number,
+  tilePx: number,
+  overlapPct: number,
+): TileRect[] {
+  const [x0, y0, x1, y1] = planView;
+  const width = x1 - x0;
+  const height = y1 - y0;
+  if (width <= 0 || height <= 0) return [];
+
+  const tileSize =
+    coordSpace === "pdf_points"
+      ? (tilePx / Math.max(dpi, 1)) * 72
+      : tilePx;
+  const overlap = tileSize * overlapPct;
+  const step = tileSize - overlap;
+  if (step <= 0) {
+    return [
+      {
+        rect: [x0, y0, x1, y1],
+        row: 0,
+        col: 0,
+        totalRows: 1,
+        totalCols: 1,
+      },
+    ];
+  }
+
+  const totalCols =
+    width > tileSize
+      ? Math.max(1, Math.ceil((width - overlap) / step))
+      : 1;
+  const totalRows =
+    height > tileSize
+      ? Math.max(1, Math.ceil((height - overlap) / step))
+      : 1;
+
+  const tiles: TileRect[] = [];
+  for (let row = 0; row < totalRows; row += 1) {
+    for (let col = 0; col < totalCols; col += 1) {
+      const tx0 = x0 + col * step;
+      const ty0 = y0 + row * step;
+      const tx1 = Math.min(tx0 + tileSize, x1);
+      const ty1 = Math.min(ty0 + tileSize, y1);
+      if (tx1 - tx0 <= 0 || ty1 - ty0 <= 0) continue;
+      tiles.push({
+        rect: [tx0, ty0, tx1, ty1],
+        row,
+        col,
+        totalRows,
+        totalCols,
+      });
+    }
+  }
+  return tiles;
+}
+
+function clampTilePx(value: number): number {
+  if (Number.isNaN(value)) return TILE_PX_MIN;
+  return Math.max(TILE_PX_MIN, Math.min(TILE_PX_MAX, Math.round(value)));
+}
+
+function clampOverlap(value: number): number {
+  if (Number.isNaN(value)) return OVERLAP_MIN;
+  return Math.max(OVERLAP_MIN, Math.min(OVERLAP_MAX, value));
+}
+
+function TilingEditor({
+  drawingId,
+  payload,
+}: {
+  drawingId: string;
+  payload: TilingApprovalPayload;
+}) {
+  const [tilePx, setTilePx] = useState<number>(() =>
+    clampTilePx(payload.tile_px),
+  );
+  const [overlapPct, setOverlapPct] = useState<number>(() =>
+    clampOverlap(payload.overlap_pct),
+  );
+
+  // Reset locally-edited values when a fresh gate payload arrives — keeps
+  // the editor in sync if the backend re-fires the gate (e.g. on retry).
+  useEffect(() => {
+    setTilePx(clampTilePx(payload.tile_px));
+    setOverlapPct(clampOverlap(payload.overlap_pct));
+  }, [payload.tile_px, payload.overlap_pct]);
+
+  // Live tile recompute. We don't trust the server's payload.tiles list
+  // beyond the initial render — every adjustment flows through this so
+  // the SVG overlay always reflects the values the user is about to
+  // submit. Memoised so the SVG render stays cheap on slider drag.
+  const tiles = useMemo(
+    () =>
+      computeTiles(
+        payload.plan_view,
+        payload.coord_space,
+        payload.dpi,
+        tilePx,
+        overlapPct,
+      ),
+    [payload.plan_view, payload.coord_space, payload.dpi, tilePx, overlapPct],
+  );
+  const tileCount = tiles.length;
+  const estimatedSec = tileCount * SECONDS_PER_TILE;
+
+  const [submitting, setSubmitting] = useState<"approve" | "cancel" | null>(
+    null,
+  );
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const onApprove = useCallback(async () => {
+    // Only ship corrections when the user actually changed something —
+    // an empty body keeps the stage defaults, which is the cheaper
+    // backend path. The clamps guarantee in-range values.
+    const corrections: TilingCorrections = {};
+    if (tilePx !== payload.tile_px) corrections.tile_px = tilePx;
+    if (overlapPct !== payload.overlap_pct) corrections.overlap_pct = overlapPct;
+    setSubmitting("approve");
+    setSubmitError(null);
+    try {
+      await approveGate(drawingId, "tiling", corrections);
+      // The reducer clears awaitingGate on the next tile_start event
+      // (the first tile fires within ms of approve, before the long
+      // VLM call returns), so the panel unmounts shortly after. Keep
+      // submitting set until then so the user can't double-submit.
+    } catch (err) {
+      setSubmitting(null);
+      setSubmitError(err instanceof Error ? err.message : "approve failed");
+    }
+  }, [drawingId, overlapPct, payload.overlap_pct, payload.tile_px, tilePx]);
+
+  const onCancel = useCallback(async () => {
+    setSubmitting("cancel");
+    setSubmitError(null);
+    try {
+      await cancelDetection(drawingId);
+    } catch (err) {
+      setSubmitting(null);
+      setSubmitError(err instanceof Error ? err.message : "cancel failed");
+    }
+  }, [drawingId]);
+
+  const [sourceW, sourceH] = payload.source_size;
+  // viewBox spans the whole source so the plan_view + tile rects sit in
+  // the same coord system as the data URL. No zoom controls in v1 of
+  // the tiling editor — the plan_view is usually the dominant content
+  // already and the side panel carries the read-only stats.
+  const viewBoxStr = `0 0 ${sourceW} ${sourceH}`;
+  const [px0, py0, px1, py1] = payload.plan_view;
+  // Label font scales with the source long-edge so it stays legible
+  // across page sizes — same heuristic as the categorize editor.
+  const labelFontSize = Math.max(10, Math.max(sourceW, sourceH) * 0.012);
+
+  return (
+    <>
+      <div className="approval-overlay-wrap">
+        <svg
+          className="approval-overlay tiling-editor-svg"
+          viewBox={viewBoxStr}
+          preserveAspectRatio="xMidYMid meet"
+        >
+          <image href={payload.raster_probe_data_url} width={sourceW} height={sourceH} />
+          {/* plan_view outline — read-only context, drawn so the user
+              sees which area the tile grid is covering. */}
+          <rect
+            x={px0}
+            y={py0}
+            width={px1 - px0}
+            height={py1 - py0}
+            fill="none"
+            stroke="#3B82F6"
+            strokeWidth={2}
+            strokeDasharray="6 4"
+            pointerEvents="none"
+          />
+          {tiles.map((tile) => {
+            const [tx0, ty0, tx1, ty1] = tile.rect;
+            return (
+              <g
+                key={`tile-${tile.row}-${tile.col}`}
+                data-tile-row={tile.row}
+                data-tile-col={tile.col}
+              >
+                <rect
+                  className="tiling-tile"
+                  x={tx0}
+                  y={ty0}
+                  width={tx1 - tx0}
+                  height={ty1 - ty0}
+                  fill="#0EA5E933"
+                  stroke="#0EA5E9"
+                  strokeWidth={1.5}
+                  pointerEvents="none"
+                />
+                <text
+                  className="tiling-tile-label"
+                  x={tx0 + 6}
+                  y={ty0 + labelFontSize + 2}
+                  fontSize={labelFontSize}
+                  fontFamily="ui-monospace, monospace"
+                  fill="#0369A1"
+                  pointerEvents="none"
+                >
+                  ({tile.row},{tile.col})
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+        <TilingControls
+          tilePx={tilePx}
+          overlapPct={overlapPct}
+          dpi={payload.dpi}
+          tileCount={tileCount}
+          estimatedSec={estimatedSec}
+          planView={payload.plan_view}
+          coordSpace={payload.coord_space}
+          onTilePxChange={(v) => setTilePx(clampTilePx(v))}
+          onOverlapChange={(v) => setOverlapPct(clampOverlap(v))}
+          disabled={submitting !== null}
+        />
+      </div>
+      {submitError && (
+        <div className="approval-submit-error" role="alert">
+          {submitError}
+        </div>
+      )}
+      <footer className="approval-panel-foot">
+        <button
+          type="button"
+          className="button button-ghost"
+          onClick={onCancel}
+          disabled={submitting !== null}
+        >
+          {submitting === "cancel" ? "Cancelling…" : "Cancel run"}
+        </button>
+        <button
+          type="button"
+          className="button button-primary"
+          onClick={onApprove}
+          disabled={submitting !== null}
+        >
+          {submitting === "approve" ? "Approving…" : "Approve tile grid"}
+        </button>
+      </footer>
+    </>
+  );
+}
+
+function TilingControls({
+  tilePx,
+  overlapPct,
+  dpi,
+  tileCount,
+  estimatedSec,
+  planView,
+  coordSpace,
+  onTilePxChange,
+  onOverlapChange,
+  disabled,
+}: {
+  tilePx: number;
+  overlapPct: number;
+  dpi: number;
+  tileCount: number;
+  estimatedSec: number;
+  planView: [number, number, number, number];
+  coordSpace: "pdf_points" | "pixels";
+  onTilePxChange: (value: number) => void;
+  onOverlapChange: (value: number) => void;
+  disabled: boolean;
+}) {
+  const planRectStr = planView.map((v) => v.toFixed(1)).join(", ");
+  const estimatedMin = Math.floor(estimatedSec / 60);
+  const estimatedSecRemainder = estimatedSec % 60;
+  const estimatedLabel =
+    estimatedMin > 0
+      ? `~${estimatedMin}m ${estimatedSecRemainder}s`
+      : `~${estimatedSec}s`;
+  return (
+    <div className="tiling-controls">
+      <div className="tiling-control-row">
+        <label htmlFor="tiling-tile-px">Tile size (px)</label>
+        <input
+          id="tiling-tile-px"
+          type="number"
+          className="tiling-control-input"
+          min={TILE_PX_MIN}
+          max={TILE_PX_MAX}
+          step={TILE_PX_STEP}
+          value={tilePx}
+          disabled={disabled}
+          onChange={(e) => onTilePxChange(Number(e.target.value))}
+          data-control="tile-px"
+        />
+        <span className="tiling-control-help">
+          {TILE_PX_MIN}–{TILE_PX_MAX}; smaller = finer detail, more calls
+        </span>
+      </div>
+      <div className="tiling-control-row">
+        <label htmlFor="tiling-overlap">Overlap</label>
+        <div className="tiling-overlap-pair">
+          <input
+            id="tiling-overlap"
+            type="range"
+            className="tiling-control-slider"
+            min={OVERLAP_MIN}
+            max={OVERLAP_MAX}
+            step={OVERLAP_STEP}
+            value={overlapPct}
+            disabled={disabled}
+            onChange={(e) => onOverlapChange(Number(e.target.value))}
+            data-control="overlap-pct"
+          />
+          <span className="tiling-control-readout mono">
+            {(overlapPct * 100).toFixed(0)}%
+          </span>
+        </div>
+        <span className="tiling-control-help">
+          {Math.round(OVERLAP_MIN * 100)}–{Math.round(OVERLAP_MAX * 100)}%; higher
+          = safer at edges, more redundant compute
+        </span>
+      </div>
+      <dl className="tiling-stats">
+        <div>
+          <dt>DPI</dt>
+          <dd className="mono" data-readonly="dpi">
+            {dpi}
+          </dd>
+        </div>
+        <div>
+          <dt>Tile count</dt>
+          <dd className="mono" data-readonly="tile-count">
+            {tileCount}
+          </dd>
+        </div>
+        <div>
+          <dt>Estimated time</dt>
+          <dd className="mono">{estimatedLabel}</dd>
+        </div>
+        <div>
+          <dt>plan_view ({coordSpace})</dt>
+          <dd className="mono tiling-stats-rect">[{planRectStr}]</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
 
 function RotateBadge() {
   return (

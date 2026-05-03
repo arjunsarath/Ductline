@@ -68,6 +68,7 @@ from app.config import settings
 from app.pipeline.base import PipelineContext, PipelineStage, VLMSegmentDraft
 from app.schemas import Geometry, ReasoningStep
 from app.source.base import DrawingSource, RectPt
+from app.source.encode import raster_probe_data_url
 from app.vlm.base import VLMClient
 from app.vlm.tools import VLMSegment
 
@@ -86,6 +87,20 @@ _VECTOR_FALLBACK_DPI = 200
 # 72 points per inch — the PDF point system. Multiplying ``tile_px / dpi``
 # converts a pixel target to a point-space rect side length.
 _PT_PER_INCH = 72
+
+# Tiling-gate corrections clamps (V2 §5.8). The user adjusts ``tile_px`` and
+# ``overlap_pct`` from the editor on the frontend; we clamp to defensible
+# ranges rather than reject so a slightly out-of-range value (e.g. the slider
+# overshoots by 1) doesn't punish the user with an aborted run. Values
+# outside these bounds are clipped and logged at WARNING.
+#   tile_px below ~600 px starts losing duct callouts at any sane DPI; above
+#   ~2000 px we exceed Ollama's payload limit on most cloud models.
+#   overlap_pct below 5% leaves small ducts straddling tile borders unread;
+#   above 40% the redundant compute crowds out useful tile budget.
+_TILE_PX_MIN = 600
+_TILE_PX_MAX = 2000
+_OVERLAP_PCT_MIN = 0.05
+_OVERLAP_PCT_MAX = 0.40
 
 # Empty-tile skip: tiles whose Canny edge density is below this threshold are
 # almost entirely background (white space, page margins, or sparse column
@@ -136,12 +151,14 @@ class TiledDuctDetectionStage(PipelineStage):
         plan_view = ctx.layout.plan_view
         dpi = _resolve_per_tile_dpi(ctx.source, plan_view, ctx)
 
+        tile_px = self._tile_px
+        overlap_pct = self._overlap_pct
         tiles = _compute_tiles(
             plan_view,
             source_kind=ctx.source.kind,
             dpi=dpi,
-            tile_px=self._tile_px,
-            overlap_pct=self._overlap_pct,
+            tile_px=tile_px,
+            overlap_pct=overlap_pct,
         )
         logger.info(
             "tiled_detect: plan_view=%s dpi=%d tiles=%d (rows=%d cols=%d)",
@@ -152,14 +169,49 @@ class TiledDuctDetectionStage(PipelineStage):
             tiles[-1][4] if tiles else 0,
         )
 
-        # NB: there used to be an HITL "tiling" gate here that paused the
-        # pipeline and asked the user to confirm tile_count / DPI / cost.
-        # Removed — the gate offered no actionable choice (tile parameters
-        # are deterministic from the plan_view the user already approved at
-        # the categorize gate), and the long delay between approval and the
-        # first stage_start event meant the SSE-driven gate-dismiss
-        # heuristic on the frontend kept the panel visible for the full
-        # multi-minute tile loop. Categorize remains the only HITL pause.
+        # HITL "tiling" gate (V2 §5.8). An earlier revision (4e231aa) removed
+        # this gate because the previous read-only stats panel offered no
+        # actionable choice. The current gate is an editable surface — the
+        # user can adjust ``tile_px`` and ``overlap_pct`` with a live tile-
+        # grid preview before committing to the multi-minute tile loop.
+        # Approve with no corrections keeps the defaults; with corrections
+        # we recompute the tile grid before iterating. The frontend's gate-
+        # dismiss heuristic latches off the next ``tile_start`` event (see
+        # processingProgress.ts), so there's no UX hang during the loop.
+        if ctx.approval_gate is not None:
+            payload = _serialise_tiling_for_approval(
+                ctx,
+                plan_view=plan_view,
+                dpi=dpi,
+                tile_px=tile_px,
+                overlap_pct=overlap_pct,
+                tiles=tiles,
+            )
+            corrections = ctx.approval_gate("tiling", payload)
+            if corrections is None:
+                # Timeout (cancellation raises) — abort with a clear error
+                # rather than burning the tile budget on an unconfirmed run.
+                raise RuntimeError("tiling gate timed out")
+            new_tile_px, new_overlap_pct = _apply_tiling_corrections(
+                corrections, current_tile_px=tile_px, current_overlap_pct=overlap_pct
+            )
+            if new_tile_px != tile_px or new_overlap_pct != overlap_pct:
+                tile_px = new_tile_px
+                overlap_pct = new_overlap_pct
+                tiles = _compute_tiles(
+                    plan_view,
+                    source_kind=ctx.source.kind,
+                    dpi=dpi,
+                    tile_px=tile_px,
+                    overlap_pct=overlap_pct,
+                )
+                logger.info(
+                    "tiled_detect: corrections applied — tile_px=%d overlap_pct=%.3f"
+                    " new_tiles=%d",
+                    tile_px,
+                    overlap_pct,
+                    len(tiles),
+                )
 
         # Per-tile call. We track results in tile order so trail context is
         # built from already-processed neighbours; see _build_trail_context.
@@ -339,6 +391,114 @@ def _compute_tiles(
                 continue
             tiles.append(((tx0, ty0, tx1, ty1), row, col, total_rows, total_cols))
     return tiles
+
+
+def _apply_tiling_corrections(
+    corrections: dict,
+    *,
+    current_tile_px: int,
+    current_overlap_pct: float,
+) -> tuple[int, float]:
+    """Resolve user-submitted tiling corrections into clamped values.
+
+    The frontend POSTs ``{ tile_px?: int, overlap_pct?: number }`` from
+    the editor on the tiling approval gate. Either field is optional —
+    a missing key keeps the current default. Out-of-range values are
+    clipped to the supported ranges (``_TILE_PX_*``, ``_OVERLAP_PCT_*``)
+    rather than rejected; clipping logs at WARNING so a faulty client
+    is visible without aborting the run.
+
+    Pure function — no ctx access — so unit tests can hit it directly.
+    """
+    tile_px = current_tile_px
+    overlap_pct = current_overlap_pct
+
+    if isinstance(corrections, dict):
+        raw_tile_px = corrections.get("tile_px")
+        if raw_tile_px is not None:
+            try:
+                requested = int(raw_tile_px)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "approve(tiling): ignoring non-int tile_px (%r)", raw_tile_px
+                )
+            else:
+                clamped = max(_TILE_PX_MIN, min(_TILE_PX_MAX, requested))
+                if clamped != requested:
+                    logger.warning(
+                        "approve(tiling): tile_px %d out of range [%d, %d] — clamped to %d",
+                        requested,
+                        _TILE_PX_MIN,
+                        _TILE_PX_MAX,
+                        clamped,
+                    )
+                tile_px = clamped
+
+        raw_overlap = corrections.get("overlap_pct")
+        if raw_overlap is not None:
+            try:
+                requested_f = float(raw_overlap)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "approve(tiling): ignoring non-numeric overlap_pct (%r)", raw_overlap
+                )
+            else:
+                clamped_f = max(_OVERLAP_PCT_MIN, min(_OVERLAP_PCT_MAX, requested_f))
+                if clamped_f != requested_f:
+                    logger.warning(
+                        "approve(tiling): overlap_pct %.3f out of range [%.2f, %.2f]"
+                        " — clamped to %.3f",
+                        requested_f,
+                        _OVERLAP_PCT_MIN,
+                        _OVERLAP_PCT_MAX,
+                        clamped_f,
+                    )
+                overlap_pct = clamped_f
+
+    return tile_px, overlap_pct
+
+
+def _serialise_tiling_for_approval(
+    ctx: PipelineContext,
+    *,
+    plan_view: RectPt,
+    dpi: int,
+    tile_px: int,
+    overlap_pct: float,
+    tiles: list[tuple[RectPt, int, int, int, int]],
+) -> dict:
+    """Build the JSON payload for the tiling approval event.
+
+    Mirrors the categorize gate's payload shape: includes the raster
+    probe as a downscaled data URL plus the tile-grid math (plan_view,
+    DPI, tile_px, overlap_pct, tile rects). The frontend recomputes
+    tiles client-side as the user adjusts ``tile_px`` / ``overlap_pct``
+    so the ``tiles`` list here is only the initial state.
+    """
+    assert ctx.source is not None
+    return {
+        "drawing_id": ctx.drawing_id,
+        "coord_space": (
+            "pdf_points" if ctx.source.kind == "vector_pdf" else "pixels"
+        ),
+        "source_size": list(ctx.source.raster_probe.size),
+        "raster_probe_data_url": raster_probe_data_url(ctx.source.raster_probe),
+        "plan_view": list(plan_view),
+        "dpi": dpi,
+        "tile_px": tile_px,
+        "overlap_pct": overlap_pct,
+        "tile_count": len(tiles),
+        "tiles": [
+            {
+                "rect": list(rect),
+                "row": row,
+                "col": col,
+                "total_rows": total_rows,
+                "total_cols": total_cols,
+            }
+            for rect, row, col, total_rows, total_cols in tiles
+        ],
+    }
 
 
 def _tile_edge_density(crop: PILImage) -> float:

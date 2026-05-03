@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from app.pipeline.base import PipelineContext
 from app.pipeline.detect_tiled import (
     TiledDuctDetectionStage,
+    _apply_tiling_corrections,
     _build_trail_context,
     _compute_tiles,
     _dedup_by_iou,
@@ -428,3 +429,68 @@ def test_empty_tile_skip_logs_edge_density(caplog) -> None:  # type: ignore[no-u
     skip_records = [r for r in caplog.records if "skipping empty tile" in r.message]
     assert skip_records, "expected at least one empty-tile skip log line"
     assert "edge_density" in skip_records[0].message
+
+
+# ── Tiling approval gate corrections (V2 §5.8 follow-up) ────────────────────
+
+
+def test_tiling_gate_corrections_apply() -> None:
+    """User-supplied tile_px / overlap_pct in the approval payload re-shape
+    the tile grid before the per-tile loop runs.
+
+    The stub ``approval_gate`` returns ``{ tile_px: 1500, overlap_pct: 0.20 }``;
+    with the larger tiles the same plan_view should produce strictly fewer
+    tiles than the default 1100 × 0.15 configuration would have.
+    """
+    src = _raster_source(width=4000, height=3000)
+    layout = PageLayout(plan_view=(0.0, 0.0, 4000.0, 3000.0))
+    ctx = _ctx_with(src, layout)
+
+    # Baseline tile count at the stage defaults — used to assert the
+    # corrections actually changed the math, not just that *some* tiles ran.
+    default_tiles = _compute_tiles(
+        layout.plan_view,
+        source_kind=src.kind,
+        dpi=200,
+        tile_px=1100,
+        overlap_pct=0.15,
+    )
+    expected_corrected_tiles = _compute_tiles(
+        layout.plan_view,
+        source_kind=src.kind,
+        dpi=200,
+        tile_px=1500,
+        overlap_pct=0.20,
+    )
+    # Sanity — the new math must differ from the default math, otherwise
+    # this test is asserting a tautology.
+    assert len(expected_corrected_tiles) != len(default_tiles)
+
+    def gate(name, payload):  # type: ignore[no-untyped-def]
+        del name, payload
+        return {"tile_px": 1500, "overlap_pct": 0.20}
+
+    ctx.approval_gate = gate
+    vlm = _StubVLM()
+
+    TiledDuctDetectionStage(vlm).run(ctx)
+
+    assert vlm.call_count == len(expected_corrected_tiles)
+
+
+def test_tiling_gate_corrections_clamp_oversize() -> None:
+    """Oversized tile_px (5000) clamps to 2000 rather than rejecting the run."""
+    new_tile_px, new_overlap = _apply_tiling_corrections(
+        {"tile_px": 5000}, current_tile_px=1100, current_overlap_pct=0.15
+    )
+    assert new_tile_px == 2000
+    assert new_overlap == 0.15
+
+
+def test_tiling_gate_no_corrections_keeps_defaults() -> None:
+    """Empty corrections dict leaves tile_px / overlap_pct untouched."""
+    new_tile_px, new_overlap = _apply_tiling_corrections(
+        {}, current_tile_px=1100, current_overlap_pct=0.15
+    )
+    assert new_tile_px == 1100
+    assert new_overlap == 0.15

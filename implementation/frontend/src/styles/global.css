@@ -900,6 +900,98 @@ a {
   font-size: 12px;
 }
 
+/* Tiling approval-gate editor (V2 §5.8). The right-hand sidebar widens to
+   ~280 px to fit the slider + stats list; the SVG keeps the same overlay
+   styling as the categorize editor. */
+.approval-overlay-wrap.tiling-editor {
+  grid-template-columns: 1fr 280px;
+}
+.tiling-editor-svg {
+  /* Inherits .approval-overlay; the marker class is here so future
+     tiling-only tweaks (e.g. crosshair cursor for a future drag-to-
+     resize tile mode) have a hook without touching the categorize
+     editor. */
+}
+.tiling-tile {
+  /* Translucent fill + thin stroke — readable on top of the page raster
+     without occluding the underlying drawing content. */
+}
+.tiling-tile-label {
+  font-weight: 500;
+}
+.tiling-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-size: 13px;
+}
+.tiling-control-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tiling-control-row label {
+  font-weight: 500;
+  color: var(--text-strong, #0F1115);
+}
+.tiling-control-input,
+.tiling-control-slider {
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+}
+.tiling-control-input {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle, #E5E1D6);
+  background: var(--bg-elevated, #FFFFFF);
+}
+.tiling-overlap-pair {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tiling-control-readout {
+  min-width: 48px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.tiling-control-help {
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+.tiling-stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px 12px;
+}
+.tiling-stats > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  border-bottom: 1px solid var(--border-subtle, #E5E1D6);
+  padding-bottom: 6px;
+}
+.tiling-stats dt {
+  font-size: 11px;
+  color: var(--text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tiling-stats dd {
+  margin: 0;
+  font-size: 13px;
+}
+.tiling-stats-rect {
+  word-break: break-all;
+  font-size: 11px;
+  text-align: right;
+}
+
 /* Live tile preview at 100% during the tile-detect phase. */
 .tile-preview {
   position: fixed;
