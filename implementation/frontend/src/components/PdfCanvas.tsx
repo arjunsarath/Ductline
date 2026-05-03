@@ -173,6 +173,14 @@ export function PdfCanvas({
       );
       fitScaleRef.current = fitScale;
 
+      // TEMP diag — verify rotation alignment with backend.
+      console.log("[PdfCanvas]", {
+        rotation,
+        pageSizePt,
+        intrinsicPdfRotate: page.rotate,
+        firstSeg: result.segments[0]?.geometry.points?.[0],
+      });
+
       await renderAtScale(fitScale);
       if (cancelled) return;
       setPdfReady(true);

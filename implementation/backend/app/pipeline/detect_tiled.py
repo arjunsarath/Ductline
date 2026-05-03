@@ -494,9 +494,15 @@ def _serialise_tiling_for_approval(
         "coord_space": "pdf_points" if is_vector else "pixels",
         "source_size": source_size_for_coord_space,
         "raster_probe_data_url": raster_probe_data_url(ctx.source.raster_probe),
-        # Frontend TilePreview re-renders from the original File via PDF.js;
-        # it must apply the same rotation the backend baked in.
-        "rotation_applied": ctx.source.rotation_applied,
+        # Absolute pymupdf rotation (intrinsic /Rotate ∪ probe_ocr's adjustment).
+        # Frontend TilePreview re-renders from the original File via PDF.js and
+        # must apply the same absolute rotation, otherwise it shows un-rotated
+        # content while tile rects sit in rotated coords.
+        "rotation_applied": (
+            int(ctx.source.page.rotation) % 360
+            if is_vector and ctx.source.page is not None
+            else ctx.source.rotation_applied
+        ),
         "plan_view": list(plan_view),
         "dpi": dpi,
         "tile_px": tile_px,

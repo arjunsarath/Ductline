@@ -58,7 +58,7 @@ def assemble_result(ctx: PipelineContext) -> DrawingResult:
         aggregate=aggregate,
         coord_space=coord_space,
         page_size_pt=ctx.source.page_size_pt,
-        rotation_applied=ctx.source.rotation_applied,
+        rotation_applied=_absolute_rotation(ctx),
         errors=ctx.errors,
     )
 
@@ -103,6 +103,24 @@ def _aggregate(segments: list[Segment]) -> AggregateStats:
             "low": conf_counter.get("low", 0),
         },
     )
+
+
+def _absolute_rotation(ctx: PipelineContext) -> int:
+    """Return the page's absolute rotation in pymupdf terms.
+
+    Vector PDFs may carry a non-zero intrinsic ``/Rotate`` that probe_ocr
+    leaves alone (already canonical). ``ctx.source.rotation_applied`` only
+    tracks rotations probe_ocr applied, so reading it would miss the
+    intrinsic case and leave the frontend's PDF.js render un-rotated while
+    segments are in rotated coords.
+    """
+    if (
+        ctx.source is not None
+        and ctx.source.kind == "vector_pdf"
+        and ctx.source.page is not None
+    ):
+        return int(ctx.source.page.rotation) % 360
+    return ctx.source.rotation_applied if ctx.source is not None else 0
 
 
 def _empty_quality() -> Quality:
