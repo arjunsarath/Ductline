@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from PIL import Image
+
 from app.pipeline.orientation import (
     detect_rotation_from_image,
     detect_rotation_from_text_layer,
+    resolve_rotation_direction,
 )
 
 # ── Fake page objects matching pymupdf.Page.get_text("dict") shape. ──────────
@@ -138,3 +141,109 @@ def test_image_rotated_returns_90() -> None:
         ],
     )
     assert detect_rotation_from_image(None, ocr) == 90  # type: ignore[arg-type]
+
+
+# ── Direction resolution. ────────────────────────────────────────────────────
+#
+# The aspect-ratio vote can detect "rotated" but not "which way" — both
+# 90° CW and 270° CW produce vertical bboxes. resolve_rotation_direction
+# renders the source at each candidate and OCRs the result; word-like
+# match counts pick the winner. The fakes below let us steer the OCR
+# output per candidate without spinning up RapidOCR.
+
+
+class _DirectionalFakeOCR:
+    """OCR stub that returns different match lists for different inputs.
+
+    The image is keyed by ``id()`` since PIL.Image equality is heavy and
+    we want strict per-render scoring. Built via ``register(image,
+    matches)`` — each candidate render gets its own match list.
+    """
+
+    def __init__(self) -> None:
+        self._by_id: dict[int, list[_FakeOCRMatch]] = {}
+
+    def register(self, image: Image.Image, matches: list[_FakeOCRMatch]) -> None:
+        self._by_id[id(image)] = matches
+
+    def extract_text(self, image: Image.Image) -> list[_FakeOCRMatch]:
+        return self._by_id.get(id(image), [])
+
+
+def _word_matches(words: list[str]) -> list[_FakeOCRMatch]:
+    return [
+        _FakeOCRMatch(text=w, bbox=(0, 0, max(len(w) * 6, 1), 14)) for w in words
+    ]
+
+
+def test_resolves_to_270_when_270_yields_more_words() -> None:
+    """The 270° render produces real words; 90° produces gibberish/empty.
+
+    Drives ``resolve_rotation_direction`` past the 1.3× margin to 270.
+    """
+    base = Image.new("RGB", (10, 10), (255, 255, 255))
+    # The PIL renders at 90 / 270 are different objects; intercept them
+    # by monkey-patching the rotate call to register fixed images.
+    img_90 = Image.new("RGB", (10, 10), (200, 200, 200))
+    img_270 = Image.new("RGB", (10, 10), (100, 100, 100))
+
+    def fake_rotate(angle: int, expand: bool = False) -> Image.Image:
+        # PIL's rotate is CCW; -90 → CW 90, -270 → CW 270.
+        del expand
+        return img_90 if angle == -90 else img_270
+
+    base.rotate = fake_rotate  # type: ignore[method-assign]
+
+    ocr = _DirectionalFakeOCR()
+    ocr.register(base, _word_matches(["12", "34"]))  # rot=0 noise — non-word
+    ocr.register(img_90, _word_matches(["xy", "1234"]))  # gibberish/numeric
+    ocr.register(
+        img_270,
+        _word_matches(["DUCT", "SCHEDULE", "PROJECT", "LEGEND", "OFFICE"]),
+    )
+
+    assert resolve_rotation_direction(base, ocr, [0, 90, 270]) == 270
+
+
+def test_resolves_to_90_when_90_yields_more_words() -> None:
+    """Mirror — the 90° render wins by margin."""
+    base = Image.new("RGB", (10, 10), (255, 255, 255))
+    img_90 = Image.new("RGB", (10, 10), (200, 200, 200))
+    img_270 = Image.new("RGB", (10, 10), (100, 100, 100))
+
+    def fake_rotate(angle: int, expand: bool = False) -> Image.Image:
+        del expand
+        return img_90 if angle == -90 else img_270
+
+    base.rotate = fake_rotate  # type: ignore[method-assign]
+
+    ocr = _DirectionalFakeOCR()
+    ocr.register(base, _word_matches(["12"]))
+    ocr.register(
+        img_90,
+        _word_matches(["DUCT", "SCHEDULE", "PROJECT", "LEGEND", "OFFICE"]),
+    )
+    ocr.register(img_270, _word_matches(["xy", "1234"]))
+
+    assert resolve_rotation_direction(base, ocr, [0, 90, 270]) == 90
+
+
+def test_resolves_to_zero_on_close_tie() -> None:
+    """Within the 1.3× margin → fail open and return 0."""
+    base = Image.new("RGB", (10, 10), (255, 255, 255))
+    img_90 = Image.new("RGB", (10, 10), (200, 200, 200))
+    img_270 = Image.new("RGB", (10, 10), (100, 100, 100))
+
+    def fake_rotate(angle: int, expand: bool = False) -> Image.Image:
+        del expand
+        return img_90 if angle == -90 else img_270
+
+    base.rotate = fake_rotate  # type: ignore[method-assign]
+
+    ocr = _DirectionalFakeOCR()
+    ocr.register(base, _word_matches(["12"]))
+    # 90 and 270 within 1.3× of each other — neither dominates.
+    ocr.register(img_90, _word_matches(["DUCT", "SCHEDULE", "PROJECT"]))
+    ocr.register(img_270, _word_matches(["LEGEND", "OFFICE", "PLAN"]))
+
+    assert resolve_rotation_direction(base, ocr, [0, 90, 270]) == 0

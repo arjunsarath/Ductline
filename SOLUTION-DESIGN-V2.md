@@ -392,12 +392,16 @@ signals and normalize once.
 - **Why no human gate of its own:** detection is reliable and the
   existing categorize gate already shows the user the (now canonically-
   oriented) raster — visual confirmation is free.
-- **What it doesn't yet do:** distinguishing 90° from 270° rotation
-  needs the intrinsic glyph-up vector which a bbox doesn't carry. We
-  default to 90° (the dominant case for landscape-in-portrait engineering
-  exports). A 270°-rotated drawing would render upside-down at the
-  categorize gate; the user cancels and the worker logs the case for
-  follow-up.
+- **Direction resolution (90° vs 270°):** the bbox aspect-ratio vote
+  detects "rotated" but cannot tell 90° CW from 270° CW (both produce
+  vertical bboxes). We render the source at each candidate rotation,
+  OCR each render at low DPI (~90), and count word-like matches
+  (≥ 4 chars, mostly alphabetic). The correct rotation produces
+  dramatically more recognised words than the wrong one — gibberish or
+  empty results from upside-down text. The winner must beat the runner-
+  up by ≥ 1.3× margin; below margin we leave rotation at 0 (fail open).
+  All orientation work runs inside `ProbeOCRStage` since direction
+  resolution needs the OCR engine; `IngestStage` stays "no engines".
 
 #### 5.8.2 Out of scope (deferred)
 
