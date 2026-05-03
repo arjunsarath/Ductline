@@ -32,6 +32,14 @@ if TYPE_CHECKING:
 # endpoint and absent on the test path.
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 
+# Optional approval-gate callback for human-in-the-loop pauses. Stages that
+# emit a gate (``categorize``, ``tiling``) call ``ctx.approval_gate(gate_name,
+# payload)`` and block until the SSE bridge's session is approved. Returns
+# True on approval, False on timeout. Cancellation raises (the runner lets
+# it propagate as a degradation). When ``ctx.approval_gate is None`` the
+# pipeline runs to completion without pausing — that's the test path.
+ApprovalGateCallback = Callable[[str, dict[str, Any]], bool]
+
 
 # ── Exceptions surfaced as HTTP errors by app.api.routes (§9). ────────────────
 
@@ -138,6 +146,12 @@ class PipelineContext:
     # caller passes a callback (SSE endpoint). Stages emit at meaningful
     # boundaries (per-tile, per-segment) for the long-running ones.
     progress: ProgressCallback | None = None
+
+    # Human-in-the-loop approval gate (V2 §5.8). Set by DetectionPipeline.run()
+    # when a session is supplied. Stages call ``ctx.approval_gate(name, payload)``
+    # to pause execution until the SSE bridge gets a POST /approve/{name}.
+    # Returns True on approval, False on timeout. Stages must tolerate None.
+    approval_gate: ApprovalGateCallback | None = None
 
 
 # ── Stage protocol. ───────────────────────────────────────────────────────────

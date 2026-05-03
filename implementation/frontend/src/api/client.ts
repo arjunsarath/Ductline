@@ -10,11 +10,46 @@
 
 import type { DrawingResult, SampleDrawing } from "../types/api";
 
+/** Approval-gate payload shape — backend pauses, frontend POSTs to release. */
+export interface CategorizeApprovalPayload {
+  drawing_id: string;
+  coord_space: "pdf_points" | "pixels";
+  page_size_pt: [number, number] | null;
+  raster_probe_size: [number, number] | null;
+  raster_probe_data_url: string | null;
+  layout: {
+    plan_view: [number, number, number, number] | null;
+    legend: [number, number, number, number] | null;
+    schedule: [number, number, number, number] | null;
+    title_block: [number, number, number, number] | null;
+    notes: Array<[number, number, number, number]>;
+  } | null;
+  errors: string[];
+}
+
+export interface TilingApprovalPayload {
+  drawing_id: string;
+  plan_view: [number, number, number, number];
+  dpi: number;
+  tile_px: number;
+  overlap_pct: number;
+  tile_count: number;
+  tiles: Array<{
+    rect: [number, number, number, number];
+    row: number;
+    col: number;
+    total_rows: number;
+    total_cols: number;
+  }>;
+}
+
 /** One pipeline progress event. Names mirror the backend SSE vocabulary. */
 export type ProgressEvent =
   | { event: "pipeline_start"; drawing_id: string; filename: string }
   | { event: "stage_start"; stage: string; index: number; total: number }
   | { event: "stage_done"; stage: string; ok: boolean; error?: string }
+  | ({ event: "awaiting_categorize_approval" } & CategorizeApprovalPayload)
+  | ({ event: "awaiting_tiling_approval" } & TilingApprovalPayload)
   | {
       event: "tile_start";
       stage: "duct_detect_tiled";
@@ -157,6 +192,35 @@ export async function listSamples(): Promise<SampleDrawing[]> {
   const response = await fetch("/api/samples");
   if (!response.ok) throw new Error(`samples failed (${response.status})`);
   return (await response.json()) as SampleDrawing[];
+}
+
+/** Release a HITL approval gate. Resolves with the server's ack on 200,
+ *  rejects on any non-2xx (including 404 — session already finished). */
+export async function approveGate(
+  drawingId: string,
+  gate: "categorize" | "tiling",
+): Promise<void> {
+  const response = await fetch(
+    `/api/detect/${encodeURIComponent(drawingId)}/approve/${gate}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`approve ${gate} failed (${response.status}): ${body}`);
+  }
+}
+
+/** Cancel an in-flight detect job. The SSE stream will terminate with an
+ *  `error` event (status 499). */
+export async function cancelDetection(drawingId: string): Promise<void> {
+  const response = await fetch(
+    `/api/detect/${encodeURIComponent(drawingId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`cancel failed (${response.status}): ${body}`);
+  }
 }
 
 export async function fetchSample(name: string): Promise<File> {

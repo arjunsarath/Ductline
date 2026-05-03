@@ -152,6 +152,36 @@ class TiledDuctDetectionStage(PipelineStage):
             tiles[-1][4] if tiles else 0,
         )
 
+        # HITL gate: pause before any VLM call so the user can confirm the
+        # tile grid (size / DPI / count). Skipped on the test path
+        # (ctx.approval_gate is None). On timeout the run aborts with an
+        # empty draft list rather than silently calling 40+ VLM tiles.
+        if ctx.approval_gate is not None and tiles:
+            payload = {
+                "drawing_id": ctx.drawing_id,
+                "plan_view": list(plan_view),
+                "dpi": dpi,
+                "tile_px": self._tile_px,
+                "overlap_pct": self._overlap_pct,
+                "tile_count": len(tiles),
+                "tiles": [
+                    {
+                        "rect": list(tile_rect),
+                        "row": row,
+                        "col": col,
+                        "total_rows": total_rows,
+                        "total_cols": total_cols,
+                    }
+                    for tile_rect, row, col, total_rows, total_cols in tiles
+                ],
+            }
+            if not ctx.approval_gate("tiling", payload):
+                logger.warning(
+                    "tiled_detect: tiling gate timed out; aborting tile loop"
+                )
+                ctx.errors.append("approval timeout: tiling gate not approved")
+                return []
+
         # Per-tile call. We track results in tile order so trail context is
         # built from already-processed neighbours; see _build_trail_context.
         processed_by_tile: dict[tuple[int, int], list[_StitchedSegment]] = {}

@@ -8,11 +8,17 @@ type, size, multi-page) propagate up because there's nothing to fall back to.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from app.ocr.base import OCRExtractor
 from app.pipeline.assemble import assemble_result
-from app.pipeline.base import PipelineContext, PipelineStage, ProgressCallback
+from app.pipeline.base import (
+    ApprovalGateCallback,
+    PipelineContext,
+    PipelineStage,
+    ProgressCallback,
+)
 from app.pipeline.categorize import PageCategorizerStage
 from app.pipeline.classify import PressureClassClassifier
 from app.pipeline.detect_tiled import TiledDuctDetectionStage
@@ -40,11 +46,14 @@ class DetectionPipeline:
         original_filename: str,
         *,
         progress: ProgressCallback | None = None,
+        approval_gate: ApprovalGateCallback | None = None,
+        drawing_id: str | None = None,
     ) -> DrawingResult:
         ctx = PipelineContext(
-            drawing_id=str(uuid4()),
+            drawing_id=drawing_id or str(uuid4()),
             original_filename=original_filename,
             progress=progress,
+            approval_gate=approval_gate,
         )
 
         if progress is not None:
@@ -87,6 +96,26 @@ class DetectionPipeline:
                         **({"error": err} if err else {}),
                     })
 
+                # HITL gate: pause after page_categorize so the user can
+                # confirm the categorizer's plan_view / legend / heading
+                # rects before we commit to the legend parse + tile plan.
+                # Only fires when (a) the stage succeeded (no point asking
+                # the user to approve a degraded layout) and (b) a gate
+                # callback is wired (the test path runs without one).
+                if (
+                    stage.name == "page_categorize"
+                    and ok
+                    and ctx.approval_gate is not None
+                ):
+                    payload = _serialise_layout_for_approval(ctx)
+                    if not ctx.approval_gate("categorize", payload):
+                        # Timeout (cancellation raises) — abort the run with
+                        # a clear error rather than silently continuing.
+                        ctx.errors.append(
+                            "approval timeout: categorize gate not approved"
+                        )
+                        break
+
             result = assemble_result(ctx)
             if progress is not None:
                 progress("pipeline_done", {
@@ -120,3 +149,70 @@ class DetectionPipeline:
             # plumbs review_verdict / review_iterations into final Segments.
             ReviewerStage(self._vlm, self._vlm),
         ]
+
+
+def _serialise_layout_for_approval(ctx: PipelineContext) -> dict:
+    """Build the JSON payload for the categorize approval event.
+
+    Includes the categorized rects (so the frontend can overlay them on the
+    page raster) and the raster_probe as a base64 data URL (so the frontend
+    has a backdrop to draw on without needing to re-fetch the source). The
+    raster is downsampled in app.pipeline.assemble already; we re-encode at
+    the same size here.
+    """
+    layout = ctx.layout
+    page_size_pt = ctx.source.page_size_pt if ctx.source is not None else None
+
+    def rect_or_none(rect):
+        return list(rect) if rect is not None else None
+
+    return {
+        "drawing_id": ctx.drawing_id,
+        "coord_space": (
+            "pdf_points" if ctx.source and ctx.source.kind == "vector_pdf" else "pixels"
+        ),
+        "page_size_pt": list(page_size_pt) if page_size_pt is not None else None,
+        "raster_probe_size": (
+            list(ctx.source.raster_probe.size) if ctx.source is not None else None
+        ),
+        "raster_probe_data_url": (
+            _raster_probe_data_url(ctx) if ctx.source is not None else None
+        ),
+        "layout": {
+            "plan_view": rect_or_none(layout.plan_view) if layout else None,
+            "legend": rect_or_none(layout.legend) if layout else None,
+            "schedule": rect_or_none(layout.schedule) if layout else None,
+            "title_block": rect_or_none(layout.title_block) if layout else None,
+            "notes": [list(r) for r in (layout.notes if layout else [])],
+        } if layout is not None else None,
+        "errors": list(ctx.errors),
+    }
+
+
+def _raster_probe_data_url(ctx: PipelineContext) -> str:
+    """Encode ctx.source.raster_probe as a downscaled PNG data URL.
+
+    Reuses assemble.py's display-size cap so the SSE payload stays modest
+    even for high-DPI inputs.
+    """
+    import base64
+    from io import BytesIO
+
+    assert ctx.source is not None
+    image = ctx.source.raster_probe
+    long_edge = max(image.size)
+    max_edge = 1600  # matches assemble's _DISPLAY_MAX_LONG_EDGE_PX class
+    if long_edge > max_edge:
+        scale = max_edge / long_edge
+        new_size = (int(image.width * scale), int(image.height * scale))
+        image = image.resize(new_size)
+    buf = BytesIO()
+    image.save(buf, format="PNG", optimize=True)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+# TYPE_CHECKING used solely to silence linters that warn on unused imports —
+# the runtime path does not import the SSE-bridge module.
+if TYPE_CHECKING:
+    from app.api.sessions import Session  # noqa: F401

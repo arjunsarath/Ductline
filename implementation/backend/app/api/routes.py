@@ -11,11 +11,13 @@ download them without needing a separate static-file server.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.deps import get_pipeline
+from app.api.sessions import registry as session_registry
 from app.api.sse import stream_detect
 from app.pipeline.base import PipelineError
 from app.pipeline.runner import DetectionPipeline
@@ -77,6 +79,38 @@ async def detect_blocking(
         return pipeline.run(file_bytes, original_filename=file.filename or "uploaded")
     except PipelineError as exc:
         raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+
+
+@router.post("/detect/{drawing_id}/approve/{gate}")
+def approve_gate(
+    drawing_id: str,
+    gate: Literal["categorize", "tiling"],
+    payload: dict | None = Body(default=None),
+) -> dict:
+    """Release a HITL approval gate for an in-flight detect job.
+
+    The SSE stream emits ``awaiting_categorize_approval`` /
+    ``awaiting_tiling_approval`` events when the pipeline reaches a gate;
+    the frontend posts back here to unblock the pipeline thread. Body is
+    optional — v1 of HITL is approve-only and any body is ignored (the
+    field is reserved for inline corrections in a follow-up).
+    """
+    session = session_registry.get(drawing_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    session.approve(gate, payload=payload)
+    return {"ok": True, "drawing_id": drawing_id, "gate": gate}
+
+
+@router.post("/detect/{drawing_id}/cancel")
+def cancel_session(drawing_id: str) -> dict:
+    """Cancel an in-flight detect job. Wakes the pipeline thread; SSE
+    stream terminates with an ``error`` event (status 499)."""
+    session = session_registry.get(drawing_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    session.cancel()
+    return {"ok": True, "drawing_id": drawing_id, "cancelled": True}
 
 
 @router.get("/samples", response_model=list[SampleDrawing])

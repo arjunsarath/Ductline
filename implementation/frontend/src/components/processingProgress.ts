@@ -10,7 +10,11 @@
  * component exports must not share a .tsx file with components.
  */
 
-import type { ProgressEvent } from "../api/client";
+import type {
+  CategorizeApprovalPayload,
+  ProgressEvent,
+  TilingApprovalPayload,
+} from "../api/client";
 
 /** v2 pipeline stage list, in execution order.
  *
@@ -47,7 +51,20 @@ export interface StageInfo {
   subProgress: { current: number; total: number; label: string } | null;
 }
 
+/** Currently-pending tile (the next or in-flight VLM call). Cleared on
+ *  tile_done so the preview doesn't lag behind the actual run. */
+export interface ActiveTile {
+  row: number;
+  col: number;
+  current: number;
+  total: number;
+  /** Set by tile_done after the call completes. Null while in-flight. */
+  segmentsFound: number | null;
+}
+
 export interface ProgressState {
+  /** Drawing ID assigned by the backend; needed for approve/cancel POSTs. */
+  drawingId: string | null;
   /** Wall-clock seconds since the pipeline_start event arrived. Null until then. */
   startedAtMs: number | null;
   /** True once pipeline_done arrives; ProcessingView uses this for the final
@@ -58,6 +75,14 @@ export interface ProgressState {
   /** Most recent progress event received — for "what's happening right now"
    *  status text in the view. */
   lastEvent: ProgressEvent | null;
+  /** Open approval gate, if any. Set on awaiting_*_approval; cleared when the
+   *  next stage_start fires (the gate has been released). */
+  awaitingGate:
+    | { gate: "categorize"; payload: CategorizeApprovalPayload }
+    | { gate: "tiling"; payload: TilingApprovalPayload }
+    | null;
+  /** Latest tile being processed (for the 100% preview panel). */
+  activeTile: ActiveTile | null;
 }
 
 const STAGE_LABEL: Record<StageName, string> = {
@@ -90,7 +115,15 @@ export function initialProgressState(): ProgressState {
       } satisfies StageInfo,
     ]),
   ) as Record<StageName, StageInfo>;
-  return { startedAtMs: null, completed: false, stages, lastEvent: null };
+  return {
+    drawingId: null,
+    startedAtMs: null,
+    completed: false,
+    stages,
+    lastEvent: null,
+    awaitingGate: null,
+    activeTile: null,
+  };
 }
 
 const STAGE_START_TIMES = new WeakMap<ProgressState, Map<StageName, number>>();
@@ -123,11 +156,15 @@ export function applyProgressEvent(
 
   switch (event.event) {
     case "pipeline_start":
+      next.drawingId = event.drawing_id;
       next.startedAtMs = performance.now();
       return next;
 
     case "stage_start": {
       const name = event.stage as StageName;
+      // Releasing a gate is observable as the next stage starting — clear
+      // any open gate so the UI dismisses the approval panel.
+      next.awaitingGate = null;
       if (!(name in next.stages)) return next;
       startTimes.set(name, performance.now());
       next.stages[name] = {
@@ -156,13 +193,10 @@ export function applyProgressEvent(
 
     case "tile_start":
     case "tile_done": {
-      // Sub-progress: "tile current/total". We update the duct_detect_tiled
-      // entry's subProgress; tile_done refreshes the same numbers (the model
-      // may have emitted segments_found we don't surface here).
       const stage = next.stages.duct_detect_tiled;
       const totalTiles = (event as { total?: number }).total ?? 0;
       const current = (event as { current?: number }).current ?? 0;
-      const totalSegmentsSoFar =
+      const segmentsFound =
         event.event === "tile_done" && typeof event.segments_found === "number"
           ? event.segments_found
           : null;
@@ -172,10 +206,20 @@ export function applyProgressEvent(
           current,
           total: totalTiles,
           label:
-            totalSegmentsSoFar != null
-              ? `tile ${current}/${totalTiles} (+${totalSegmentsSoFar})`
+            segmentsFound != null
+              ? `tile ${current}/${totalTiles} (+${segmentsFound})`
               : `tile ${current}/${totalTiles}`,
         },
+      };
+      // Active tile: keep the latest row/col and segmentsFound. tile_start
+      // resets segmentsFound to null (in-flight); tile_done sets it to the
+      // count returned by the model. Used by the 100% tile preview panel.
+      next.activeTile = {
+        row: (event as { row: number }).row,
+        col: (event as { col: number }).col,
+        current,
+        total: totalTiles,
+        segmentsFound,
       };
       return next;
     }
@@ -204,6 +248,16 @@ export function applyProgressEvent(
 
     case "pipeline_done":
       next.completed = true;
+      next.awaitingGate = null;
+      next.activeTile = null;
+      return next;
+
+    case "awaiting_categorize_approval":
+      next.awaitingGate = { gate: "categorize", payload: event };
+      return next;
+
+    case "awaiting_tiling_approval":
+      next.awaitingGate = { gate: "tiling", payload: event };
       return next;
 
     default:

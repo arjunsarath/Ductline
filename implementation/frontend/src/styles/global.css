@@ -650,6 +650,179 @@ a {
   white-space: nowrap;
 }
 
+/* HITL approval panel (V2 §5.8) — modal-ish overlay shown when the pipeline
+   pauses at a gate. Sits on top of the existing processing layout; clicking
+   Approve / Cancel POSTs to the backend and the SSE stream resumes. */
+.approval-panel {
+  position: fixed;
+  inset: 32px;
+  z-index: 100;
+  background: var(--bg-elevated, #FFFFFF);
+  border: 1px solid var(--border-subtle, #E5E1D6);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(15, 17, 21, 0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.approval-panel-head {
+  padding: 24px 32px 16px;
+  border-bottom: 1px solid var(--border-subtle, #E5E1D6);
+}
+.approval-panel-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 6px 0 4px;
+}
+.approval-panel-sub {
+  color: var(--text-muted);
+  font-size: 14px;
+  max-width: 720px;
+}
+.approval-panel-foot {
+  padding: 16px 32px;
+  border-top: 1px solid var(--border-subtle, #E5E1D6);
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  background: var(--bg-subtle, #FAFAF7);
+}
+.approval-panel-empty {
+  padding: 32px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.approval-overlay-wrap {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 16px;
+  padding: 16px 32px;
+  min-height: 0;
+}
+.approval-overlay {
+  width: 100%;
+  height: 100%;
+  background: #F5F2E8;
+  border: 1px solid var(--border-subtle, #E5E1D6);
+  border-radius: 8px;
+}
+.approval-overlay-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.approval-overlay-legend li {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.approval-overlay-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.approval-overlay-present {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #059669;
+}
+.approval-overlay-absent {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+.approval-tiling {
+  flex: 1;
+  padding: 16px 32px 32px;
+  overflow-y: auto;
+}
+.approval-tiling-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 32px;
+  max-width: 640px;
+  margin: 0;
+}
+.approval-tiling-stats > div {
+  border-bottom: 1px solid var(--border-subtle, #E5E1D6);
+  padding: 8px 0;
+}
+.approval-tiling-stats dt {
+  font-size: 12px;
+  color: var(--text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.approval-tiling-stats dd {
+  margin: 0;
+  font-size: 14px;
+}
+.approval-tiling-rect {
+  word-break: break-all;
+}
+
+/* Live tile preview at 100% during the tile-detect phase. */
+.tile-preview {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 380px;
+  max-height: 60vh;
+  z-index: 50;
+  background: var(--bg-elevated, #FFFFFF);
+  border: 1px solid var(--border-subtle, #E5E1D6);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 17, 21, 0.10);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tile-preview-empty {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.tile-preview-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle, #E5E1D6);
+}
+.tile-preview-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.tile-preview-status {
+  font-size: 12px;
+  color: var(--agent, #3B82F6);
+  margin-top: 4px;
+  font-weight: 500;
+}
+.tile-preview-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: calc(60vh - 96px);
+  background: #FFFFFF;
+  margin: 0 auto;
+  /* Image rendering crisp so the user can read small text in the tile. */
+  image-rendering: pixelated;
+  object-fit: contain;
+}
+.tile-preview-error {
+  padding: 16px;
+  color: #dc2626;
+  font-size: 13px;
+}
+
 .processing-foot {
   display: flex;
   align-items: center;

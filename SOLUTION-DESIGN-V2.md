@@ -284,6 +284,93 @@ Each change is described with: *gap addressed*, *what changes*, *why now*, *prio
 - **Expected impact:** Infinite-zoom inspection on vector inputs; users see the engineer-style review.
 - **Expected cost:** ~1.0 day.
 
+### 5.8 Human-in-the-loop approval gates + live tile preview (P0 — added post-V1 of V2)
+
+- **Gap:** even after §5.3 (categorizer), §5.5 (tiled detect), §5.6 (reviewer), the
+  V2 build was emitting hallucinated detections in non-plan-view areas of test
+  drawings. Root causes were two-fold: (a) the categorizer's strip-merge collapsed
+  every Hough rectangle into one whole-page rect on benchmark 01, so legend / heading
+  / column markers stayed inside `plan_view`; (b) we couldn't see what each VLM tile
+  actually received — the rendered crops at the per-tile DPI may have been too small
+  for the model to read duct callouts. Without empirical visibility, every fix was
+  speculative.
+- **Change:** the pipeline now pauses at two human-in-the-loop (HITL) approval gates,
+  and the processing UI shows each tile rendered at 100% as it's sent to the VLM.
+  - **Gate 1 — `categorize`** fires after `page_categorize` and before
+    `legend_parse`. The frontend overlay shows the categorizer's `plan_view`,
+    `legend`, `schedule`, `title_block`, and `notes` rects on top of the page
+    raster. The user clicks **Approve** to continue (current behaviour) or
+    **Cancel** to abort the run (new — surfaces a clean "this drawing isn't
+    going to work" exit).
+  - **Gate 2 — `tiling`** fires inside `duct_detect_tiled` after the tile grid
+    has been computed but before the first VLM call. Shows tile size, DPI,
+    overlap %, tile count, and an estimated wall-clock cost. User approves or
+    cancels.
+  - **Live tile preview** is a sidebar panel that updates as each tile starts
+    processing. The frontend renders the tile rect from the original `File` via
+    PDF.js at the per-tile DPI — visually identical to the model's input. After
+    `tile_done` the panel shows the segment count returned. This is the
+    diagnostic surface that closes the readability question: if the duct
+    callouts are visible to the human, they're visible to the model; if they're
+    not, the per-tile DPI needs raising before we ship anything else.
+- **Why now:** without the gate-1 overlay we couldn't tell whether wrong detections
+  were caused by a wrong `plan_view` (categorizer fault) or by the model
+  hallucinating from a correct tile (model fault). Without the live preview we
+  couldn't tell whether the per-tile DPI was producing readable content. Both
+  were invisible failures we were debugging blind.
+- **Priority:** P0 (debuggability). The gates are also a feature in their own
+  right — the user gets to confirm or reject the plan before paying ~5–15 min of
+  VLM inference cost.
+- **Expected impact:** turns silent regressions into visible ones; lets the
+  user catch a bad categorization before tiling, and a too-small/too-large
+  DPI before the bulk of the run. Direct line to root-causing the hallucinations
+  reported on benchmark 01.
+- **Expected cost:** ~1 day. Required: stateful sessions on the backend (in-memory
+  registry, no DB), bidirectional approve / cancel POSTs, ProcessingView refactor
+  to render approval overlays + tile preview.
+
+#### 5.8.1 Architecture
+
+```
+[client] POST /api/detect (FormData)
+          ↓ SSE stream
+[server] create Session(drawing_id) → registry
+[server] pipeline runs in worker thread:
+   ingest → probe_ocr → page_categorize
+   ↓ emit awaiting_categorize_approval { layout, raster_probe_data_url }
+   ↓ session.wait_for_approval("categorize")  ← BLOCKS
+                                          ← [client] POST /detect/:id/approve/categorize
+   ↓ resume: legend_parse → quality → region_detect →
+     [duct_detect_tiled: compute tiles]
+   ↓ emit awaiting_tiling_approval { tile_count, dpi, tile_rects }
+   ↓ session.wait_for_approval("tiling")     ← BLOCKS
+                                          ← [client] POST /detect/:id/approve/tiling
+   ↓ resume: per-tile loop:
+        emit tile_start (frontend renders the tile crop at 100%)
+        VLM call
+        emit tile_done { segments_found } (frontend updates count)
+   ↓ text_extract → pressure_class → review → assemble
+   ↓ emit result { drawing_result_json }
+[server] registry.remove(drawing_id)
+```
+
+Cancellation: `POST /api/detect/:id/cancel` sets the session's cancelled flag; the
+pipeline thread sees it on the next gate wait or sweep, raises `SessionCancelled`,
+the SSE stream emits `error` with status 499, and the registry cleans up. Sessions
+auto-expire 30 min after creation so abandoned runs don't leak.
+
+#### 5.8.2 Out of scope (deferred)
+
+- **Inline correction UIs.** v1 of HITL is approve-or-cancel only. Editing the
+  `plan_view` rect, removing tiles from the grid, or re-classifying the legend are
+  v3 features — they need drag-to-resize / click-to-edit components that don't
+  exist yet.
+- **Persistence across page refresh.** Refreshing during a paused run cancels the
+  session via the disconnect handler. Adding session resume needs a job-id in the
+  URL bar and is deferred.
+- **Multi-tenant safety.** The session registry is process-local and unauthenticated.
+  This matches the rest of v2 (single-user dev tool) and would change in a hosted v3.
+
 ---
 
 ## 6. Architectural changes — new named seams

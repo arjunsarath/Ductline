@@ -23,7 +23,7 @@ import type { DrawingResult } from "./types/api";
 
 type View =
   | { kind: "upload" }
-  | { kind: "processing"; filename: string; progress: ProgressState }
+  | { kind: "processing"; filename: string; file: File; progress: ProgressState }
   | { kind: "result"; filename: string; file: File; result: DrawingResult }
   | { kind: "error"; filename: string; message: string };
 
@@ -34,6 +34,7 @@ export default function App() {
     setView({
       kind: "processing",
       filename: file.name,
+      file,
       progress: initialProgressState(),
     });
     try {
@@ -66,7 +67,11 @@ export default function App() {
       return <UploadView onFile={handleFile} />;
     case "processing":
       return (
-        <ProcessingView filename={view.filename} progress={view.progress} />
+        <ProcessingView
+          filename={view.filename}
+          file={view.file}
+          progress={view.progress}
+        />
       );
     case "result":
       return (

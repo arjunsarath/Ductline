@@ -12,7 +12,7 @@
  * pipeline_start event arrived (or since component mount as a fallback).
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   STAGE_ORDER,
   elapsedSeconds,
@@ -21,11 +21,17 @@ import {
   type StageInfo,
   type StageName,
 } from "./processingProgress";
+import { ApprovalPanel } from "./ApprovalPanel";
 import { Brand } from "./Brand";
 import { Stepper } from "./Stepper";
+import { TilePreview } from "./TilePreview";
+import type { TilingApprovalPayload } from "../api/client";
 
 interface Props {
   filename: string;
+  /** Original file from upload — needed for client-side PDF.js rendering of
+   *  tile previews. May be null if the user navigated mid-flow. */
+  file: File | null;
   progress: ProgressState;
 }
 
@@ -55,7 +61,7 @@ const STAGE_DETAIL: Record<StageName, string> = {
   review: "per-segment verdict · refine if implausible · max 2 iters",
 };
 
-export function ProcessingView({ filename, progress }: Props) {
+export function ProcessingView({ filename, file, progress }: Props) {
   // Ticker for the timer display. We don't store the elapsed value in
   // state because progress updates also re-render — a 100 ms tick is
   // enough for a smooth "MM:SS.s" display.
@@ -64,6 +70,34 @@ export function ProcessingView({ filename, progress }: Props) {
     const id = window.setInterval(() => setTick((t) => t + 1), 100);
     return () => window.clearInterval(id);
   }, []);
+
+  // Latest tiling plan, kept in a memo so the TilePreview always has a
+  // tile rect to map (active, row, col) to. The plan freezes once approved
+  // (no further awaiting_tiling_approval events arrive).
+  const tilingPlan: TilingApprovalPayload | null = useMemo(() => {
+    if (progress.awaitingGate?.gate === "tiling") {
+      return progress.awaitingGate.payload;
+    }
+    if (progress.lastEvent && progress.lastEvent.event === "awaiting_tiling_approval") {
+      return progress.lastEvent;
+    }
+    // Otherwise we can't reconstruct it — TilePreview just shows "waiting"
+    // until the next awaiting_tiling_approval (a re-run) or the user can
+    // skip the live preview without breaking processing.
+    return _lastApprovedTilingPlan;
+  }, [progress.awaitingGate, progress.lastEvent]);
+  // Stash the most-recent tiling plan in module scope so it survives
+  // re-renders after the gate releases. (The reducer clears
+  // awaitingGate on stage_start; without this the plan would be lost.)
+  if (progress.awaitingGate?.gate === "tiling") {
+    _lastApprovedTilingPlan = progress.awaitingGate.payload;
+  }
+  const coordSpace = useMemo<"pdf_points" | "pixels">(() => {
+    if (progress.awaitingGate?.gate === "categorize") {
+      return progress.awaitingGate.payload.coord_space;
+    }
+    return "pdf_points";  // best-effort default — PDF.js path tolerates it
+  }, [progress.awaitingGate]);
 
   const elapsed = elapsedSeconds(progress, performance.now());
   const activeStage = findActiveStage(progress);
@@ -132,10 +166,36 @@ export function ProcessingView({ filename, progress }: Props) {
             sub-progress above tracks each one.
           </span>
         </div>
+
+        {/* HITL approval gate — overlay shown only while a gate is open. */}
+        {progress.awaitingGate && progress.drawingId && (
+          <ApprovalPanel
+            drawingId={progress.drawingId}
+            gate={progress.awaitingGate}
+          />
+        )}
+
+        {/* Tile preview at 100% — visible whenever tile_start has fired
+            and we have enough plan info to map (row,col) → tile_rect. */}
+        {progress.activeTile && tilingPlan && (
+          <TilePreview
+            file={file}
+            plan={tilingPlan}
+            active={progress.activeTile}
+            coordSpace={coordSpace}
+            rasterDataUrl={null}
+          />
+        )}
       </section>
     </main>
   );
 }
+
+// Module-scope cache of the most-recent tiling plan. Survives the
+// transient awaitingGate clearing on stage_start so the tile preview can
+// keep mapping (row,col) → tile_rect after approval. Per-tab; reset on
+// page reload.
+let _lastApprovedTilingPlan: TilingApprovalPayload | null = null;
 
 function PipelineRow({
   num,

@@ -30,11 +30,18 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
+from uuid import uuid4
 
+from app.api.sessions import SessionCancelled, registry
 from app.pipeline.base import PipelineError
 from app.pipeline.runner import DetectionPipeline
 
 logger = logging.getLogger(__name__)
+
+# How long the pipeline thread will block waiting for an approval before
+# giving up and degrading the run. Generous — matches the session TTL so a
+# distracted user has the same window as a disconnected client.
+_APPROVAL_TIMEOUT_S = 30 * 60
 
 
 def _sse_event(name: str, data: dict[str, Any]) -> bytes:
@@ -50,13 +57,21 @@ async def stream_detect(
     """Run the pipeline in a worker thread, stream progress as SSE bytes.
 
     Yields a sequence of SSE records in this order:
-      1. zero or more ``progress`` events (one per pipeline progress callback)
+      1. zero or more ``progress`` events (stage / tile / segment events,
+         and ``awaiting_*`` events when a HITL gate is open)
       2. exactly one terminal event — either ``result`` (success) or
-         ``error`` (a ``PipelineError`` propagated up; non-pipeline
-         exceptions also surface as ``error`` with status 500).
+         ``error`` (a ``PipelineError`` propagated up; ``SessionCancelled``
+         maps to status 499; non-pipeline exceptions surface as 500).
+
+    A session is registered up-front so the API layer can resolve the
+    drawing_id from approve/cancel POSTs before the pipeline reaches its
+    first gate. The session is removed in ``finally`` regardless of how
+    the run ends.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+    drawing_id = str(uuid4())
+    session = registry.create(drawing_id)
 
     # Sentinel value pushed once the worker thread completes — lets the
     # generator know there will be no more progress events to await.
@@ -67,12 +82,28 @@ async def stream_detect(
         # documented way to bridge a sync thread → asyncio loop.
         loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
+    def approval_gate(gate: str, payload: dict[str, Any]) -> bool:
+        """HITL pause point — emit awaiting_* event, block until approved."""
+        progress_callback(f"awaiting_{gate}_approval", payload)
+        try:
+            return session.wait_for_approval(  # type: ignore[arg-type]
+                gate,  # type: ignore[arg-type]
+                timeout=_APPROVAL_TIMEOUT_S,
+            )
+        except SessionCancelled:
+            # Surface as a regular Python exception inside the pipeline
+            # thread — the runner catches it, marks ctx.errors, and the
+            # main except below converts it to an SSE error event.
+            raise
+
     def run_pipeline() -> Any:
         try:
             return pipeline.run(
                 file_bytes,
                 original_filename=original_filename,
                 progress=progress_callback,
+                approval_gate=approval_gate,
+                drawing_id=drawing_id,
             )
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, done_sentinel)
@@ -82,29 +113,33 @@ async def stream_detect(
     pipeline_task = asyncio.create_task(asyncio.to_thread(run_pipeline))
 
     try:
-        while True:
-            event, payload = await queue.get()
-            if event == "__done__":
-                break
-            yield _sse_event("progress", {"event": event, **payload})
-    except asyncio.CancelledError:
-        # Client disconnected mid-stream — the pipeline thread keeps going
-        # but its result is discarded. Re-raise so the StreamingResponse
-        # cleanup path runs.
-        pipeline_task.cancel()
-        raise
+        try:
+            while True:
+                event, payload = await queue.get()
+                if event == "__done__":
+                    break
+                yield _sse_event("progress", {"event": event, **payload})
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream — cancel the session so the
+            # pipeline thread unblocks any pending approval wait, then
+            # re-raise so the StreamingResponse cleanup path runs.
+            session.cancel()
+            pipeline_task.cancel()
+            raise
 
-    try:
-        result = await pipeline_task
-        # DrawingResult is a frozen pydantic BaseModel — model_dump gives a
-        # JSON-serialisable dict.
-        yield _sse_event("result", {"result": result.model_dump()})
-    except PipelineError as exc:
-        logger.warning("stream_detect: pipeline error: %s", exc)
-        yield _sse_event("error", {
-            "message": str(exc),
-            "status": exc.http_status,
-        })
-    except Exception as exc:  # noqa: BLE001 — surface as 500 SSE error
-        logger.exception("stream_detect: unexpected error")
-        yield _sse_event("error", {"message": str(exc), "status": 500})
+        try:
+            result = await pipeline_task
+            yield _sse_event("result", {"result": result.model_dump()})
+        except SessionCancelled as exc:
+            yield _sse_event("error", {"message": str(exc), "status": 499})
+        except PipelineError as exc:
+            logger.warning("stream_detect: pipeline error: %s", exc)
+            yield _sse_event("error", {
+                "message": str(exc),
+                "status": exc.http_status,
+            })
+        except Exception as exc:  # noqa: BLE001 — surface as 500 SSE error
+            logger.exception("stream_detect: unexpected error")
+            yield _sse_event("error", {"message": str(exc), "status": 500})
+    finally:
+        registry.remove(drawing_id)
