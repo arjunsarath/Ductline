@@ -14,6 +14,7 @@ from v1.
 
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 
 import pymupdf
@@ -29,7 +30,13 @@ from app.pipeline.base import (
     PipelineStage,
     UnsupportedFileError,
 )
+from app.pipeline.orientation import (
+    Rotation,
+    detect_rotation_from_text_layer,
+)
 from app.source.base import DrawingSource
+
+logger = logging.getLogger(__name__)
 
 _PDF_MAGIC = b"%PDF"
 # Threshold for vector vs raster PDF classification — drawings exported from
@@ -97,6 +104,21 @@ class IngestStage(PipelineStage):
     def _build_vector_source(
         self, doc: pymupdf.Document, page: pymupdf.Page
     ) -> DrawingSource:
+        # Auto-orientation: detect rotation from the text-layer BEFORE we
+        # render, then apply via page.set_rotation() so the rendered probe
+        # AND every later page.get_pixmap(clip=...) call (per-tile detect)
+        # come out in canonical orientation. Engineering PDFs commonly
+        # contain landscape drawings rotated 90° within a portrait page.
+        rotation: Rotation = detect_rotation_from_text_layer(page)
+        if rotation != 0:
+            page.set_rotation(rotation)
+            logger.info(
+                "ingest: applied auto-rotation rotation=%d to vector_pdf",
+                rotation,
+            )
+
+        # page.rect reflects the CURRENT rotation — width/height swap on
+        # 90/270. page_size_pt records the canonical-orientation size.
         page_size_pt = (page.rect.width, page.rect.height)
         pixmap = page.get_pixmap(dpi=settings.probe_dpi)
         mode = "RGBA" if pixmap.alpha else "RGB"
@@ -109,6 +131,7 @@ class IngestStage(PipelineStage):
             page=page,
             page_size_pt=page_size_pt,
             raster_probe=probe,
+            rotation_applied=rotation,
         )
 
     def _build_raster_pdf_source(self) -> DrawingSource:

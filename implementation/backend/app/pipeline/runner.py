@@ -178,6 +178,9 @@ def _serialise_layout_for_approval(ctx: PipelineContext) -> dict:
         "raster_probe_data_url": (
             _raster_probe_data_url(ctx) if ctx.source is not None else None
         ),
+        "rotation_applied": (
+            ctx.source.rotation_applied if ctx.source is not None else 0
+        ),
         "layout": {
             "plan_view": rect_or_none(layout.plan_view) if layout else None,
             "legend": rect_or_none(layout.legend) if layout else None,

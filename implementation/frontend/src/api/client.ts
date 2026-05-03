@@ -17,6 +17,11 @@ export interface CategorizeApprovalPayload {
   page_size_pt: [number, number] | null;
   raster_probe_size: [number, number] | null;
   raster_probe_data_url: string | null;
+  /** Clockwise degrees applied at ingest to bring the source to canonical
+   *  orientation. 0 means already canonical; 90/180/270 means we auto-
+   *  rotated. Surfaced so the UI can show "auto-rotated" and the user
+   *  can cancel if the heuristic got it wrong. */
+  rotation_applied: 0 | 90 | 180 | 270;
   layout: {
     plan_view: [number, number, number, number] | null;
     legend: [number, number, number, number] | null;

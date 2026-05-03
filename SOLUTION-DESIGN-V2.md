@@ -359,6 +359,46 @@ pipeline thread sees it on the next gate wait or sweep, raises `SessionCancelled
 the SSE stream emits `error` with status 499, and the registry cleans up. Sessions
 auto-expire 30 min after creation so abandoned runs don't leak.
 
+#### 5.8.3 Auto-orientation normalize (added during HITL build)
+
+The first run of the categorize approval gate revealed a more fundamental
+problem: every drawing in the benchmark set is a **landscape mechanical
+plan rotated 90° to fit a portrait page**. Page metadata reports
+`rotation=0` because the rotation is baked into the content (CAD export
+artifact), so all geometric heuristics downstream — Hough decomposition,
+strip-merge thresholds, title-block "bottom-right" rule, tile rendering
+orientation, even the model's recognition of duct callouts — were
+operating on rotated input. Fix: detect rotation at ingest from cheap
+signals and normalize once.
+
+- **Detection (vector PDFs):** iterate text-layer spans; classify each
+  span's bbox as horizontal (`width > 1.3 × height`) or vertical
+  (`height > 1.3 × width`); majority vote with a 1.5× margin gate. The
+  PDF `dir` field on text spans is unreliable on rotated content (often
+  reports `(1.0, 0.0)` regardless), so geometry is the ground truth.
+  Spans shorter than 4 chars are ignored as noise.
+- **Detection (raster sources):** OCR the probe at low DPI; same
+  aspect-ratio vote on OCR-match bboxes. Costs one extra OCR pass on
+  rotated drawings only (the rotation is then applied and the matches
+  re-collected post-rotation so all downstream cache lookups are in
+  canonical coords).
+- **Application:** for `vector_pdf`, `pymupdf.Page.set_rotation(rot)`
+  before any `get_pixmap()` call — every render (probe + per-tile) now
+  comes out in canonical orientation. For raster, `PIL.Image.rotate(
+  -rot, expand=True)` once on `raster_probe`. The rotation amount is
+  stored on `DrawingSource.rotation_applied` and surfaced via the
+  categorize approval event (frontend shows an amber banner: "Auto-
+  rotated 90° CW — cancel if wrong").
+- **Why no human gate of its own:** detection is reliable and the
+  existing categorize gate already shows the user the (now canonically-
+  oriented) raster — visual confirmation is free.
+- **What it doesn't yet do:** distinguishing 90° from 270° rotation
+  needs the intrinsic glyph-up vector which a bbox doesn't carry. We
+  default to 90° (the dominant case for landscape-in-portrait engineering
+  exports). A 270°-rotated drawing would render upside-down at the
+  categorize gate; the user cancels and the worker logs the case for
+  follow-up.
+
 #### 5.8.2 Out of scope (deferred)
 
 - **Inline correction UIs.** v1 of HITL is approve-or-cancel only. Editing the

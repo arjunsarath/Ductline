@@ -45,6 +45,16 @@ export function ApprovalPanel({ drawingId, gate }: Props) {
             ? "Review what the system thinks is the plan view, legend, and headings before we parse the legend and tile the drawing."
             : "Review the tile grid + DPI before we send each tile to the model. ~10 s per tile."}
         </p>
+        {gate.gate === "categorize" && gate.payload.rotation_applied !== 0 && (
+          <div className="approval-rotation-banner">
+            <RotateBadge />
+            <span>
+              Auto-rotated <strong>{gate.payload.rotation_applied}° CW</strong> at ingest —
+              source content was landscape inside a portrait page. Cancel if the rotated
+              preview below looks wrong.
+            </span>
+          </div>
+        )}
       </header>
 
       {gate.gate === "categorize" ? (
@@ -186,6 +196,29 @@ function TilingBody({ payload }: { payload: TilingApprovalPayload }) {
     </div>
   );
 }
+
+function RotateBadge() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M11 7 A 4 4 0 1 1 7 3"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <path
+        d="M7 1.5 L7 3.5 L9 3.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
 
 function RectOverlay({
   rect,

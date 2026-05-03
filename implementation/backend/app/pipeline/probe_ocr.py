@@ -22,6 +22,7 @@ from app.config import settings
 from app.ocr.base import OCRExtractor, OCRMatch
 from app.ocr.cache import OCRCache
 from app.pipeline.base import PipelineContext, PipelineStage
+from app.pipeline.orientation import Rotation, detect_rotation_from_image
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,27 @@ class ProbeOCRStage(PipelineStage):
     def _build_from_ocr(self, ctx: PipelineContext) -> OCRCache:
         assert ctx.source is not None
         matches = self._ocr.extract_text(ctx.source.raster_probe)
+
+        # Auto-orientation for raster sources (vector_pdf rotation lives in
+        # IngestStage where the page object is available). If the OCR vote
+        # says the probe is rotated, rotate it in place and re-OCR — costs
+        # one extra OCR pass on rotated drawings only.
+        rotation: Rotation = detect_rotation_from_image(ctx.source.raster_probe, self._ocr)
+        if rotation != 0 and ctx.source.rotation_applied == 0:
+            logger.info(
+                "probe_ocr: applying auto-rotation rotation=%d to %s",
+                rotation, ctx.source.kind,
+            )
+            # PIL.Image.rotate is counter-clockwise; pass -rotation for CW.
+            # expand=True grows the canvas to fit the rotated image so we
+            # don't crop content.
+            ctx.source.raster_probe = ctx.source.raster_probe.rotate(
+                -rotation, expand=True
+            )
+            ctx.source.rotation_applied = rotation
+            # Re-OCR the canonically-oriented image so matches downstream
+            # are in the post-rotation coord space.
+            matches = self._ocr.extract_text(ctx.source.raster_probe)
 
         heights = sorted(float(m.bbox[3]) for m in matches if m.bbox[3] > 0)
         smallest_px = _percentile_sorted(heights, _SMALLEST_PERCENTILE) if heights else 0.0

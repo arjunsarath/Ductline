@@ -38,6 +38,14 @@ class DrawingSource(BaseModel):
     page: Any | None = None  # pymupdf.Page — page 0
     page_size_pt: tuple[float, float] | None = None
     raster_probe: Image.Image  # always populated
+    # Clockwise rotation applied at ingest to bring the source into
+    # canonical (left-to-right reading) orientation. 0 when no rotation
+    # was needed; 90/180/270 when the source had landscape content
+    # rotated within a portrait page (or similar). All downstream stages
+    # see ``raster_probe`` and ``page`` already in canonical orientation —
+    # the field is informational, surfaced via the categorize approval
+    # event so the user can cancel if the auto-rotation got it wrong.
+    rotation_applied: Literal[0, 90, 180, 270] = 0
 
     def render(self, rect_pt: RectPt, dpi: int) -> Image.Image:
         """Render a region.
