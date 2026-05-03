@@ -476,12 +476,23 @@ def _serialise_tiling_for_approval(
     so the ``tiles`` list here is only the initial state.
     """
     assert ctx.source is not None
+    # source_size MUST match the coord_space the tile rects use, NOT the
+    # raster_probe pixel dimensions blindly. For vector_pdf, _compute_tiles
+    # returns rects in PDF points (e.g. 0-842 range on a US-letter
+    # landscape page); the SVG viewBox needs the same units or the tiles
+    # render in a small upper-left corner of the raster image. For raster
+    # sources the rects are pixel-space and source_size IS the raster
+    # probe pixel size.
+    is_vector = ctx.source.kind == "vector_pdf" and ctx.source.page_size_pt is not None
+    source_size_for_coord_space: list[float] = (
+        list(ctx.source.page_size_pt)  # type: ignore[arg-type]
+        if is_vector
+        else list(ctx.source.raster_probe.size)
+    )
     return {
         "drawing_id": ctx.drawing_id,
-        "coord_space": (
-            "pdf_points" if ctx.source.kind == "vector_pdf" else "pixels"
-        ),
-        "source_size": list(ctx.source.raster_probe.size),
+        "coord_space": "pdf_points" if is_vector else "pixels",
+        "source_size": source_size_for_coord_space,
         "raster_probe_data_url": raster_probe_data_url(ctx.source.raster_probe),
         "plan_view": list(plan_view),
         "dpi": dpi,

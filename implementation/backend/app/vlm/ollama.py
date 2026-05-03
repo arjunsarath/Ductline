@@ -50,10 +50,12 @@ logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _VLM_LONG_EDGE_PX = 1568  # llama3.2-vision native input edge
-# 240s timeout accommodates Ollama Cloud (qwen3-vl:235b-cloud is the default):
-# cloud calls go over the internet and have materially higher 99p latency than
-# a local-loopback Ollama. Local llama3.2-vision finishes well under this cap.
-_OLLAMA_TIMEOUT_S = 240.0
+# Cloud cold-starts on qwen3-vl:235b-cloud can legitimately exceed 4 min on
+# the first call after a long idle, especially when the model isn't warm in
+# the host's cache. 10 min is a safer ceiling — healthy calls finish in
+# seconds, so the timeout only matters on cold start / queue contention.
+# Local llama3.2-vision finishes well under this cap.
+_OLLAMA_TIMEOUT_S = 600.0
 
 # Inline prompt — short enough that a separate prompt file would cost more in
 # indirection than it saves. Mirrors the categorizer rectangle taxonomy from
@@ -183,7 +185,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM categorize JSON invalid: {exc}") from exc
+            raise _bad_json_error("categorize_region", raw, exc) from exc
         try:
             tool = CategorizePageTool.model_validate(data)
         except ValidationError as exc:
@@ -231,7 +233,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM page-regions JSON invalid: {exc}") from exc
+            raise _bad_json_error("detect_page_regions", raw, exc) from exc
         try:
             tool = PageRegionsTool.model_validate(data)
         except ValidationError as exc:
@@ -283,7 +285,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM plan_view JSON invalid: {exc}") from exc
+            raise _bad_json_error("detect_plan_view", raw, exc) from exc
         try:
             tool = PlanViewTool.model_validate(data)
         except ValidationError as exc:
@@ -328,7 +330,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM legend JSON invalid: {exc}") from exc
+            raise _bad_json_error("detect_legend", raw, exc) from exc
         try:
             tool = LegendRegionTool.model_validate(data)
         except ValidationError as exc:
@@ -375,7 +377,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM title_block JSON invalid: {exc}") from exc
+            raise _bad_json_error("detect_title_block", raw, exc) from exc
         try:
             tool = TitleBlockTool.model_validate(data)
         except ValidationError as exc:
@@ -419,7 +421,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM notes JSON invalid: {exc}") from exc
+            raise _bad_json_error("detect_notes", raw, exc) from exc
         try:
             tool = NotesRegionTool.model_validate(data)
         except ValidationError as exc:
@@ -464,7 +466,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM schedule JSON invalid: {exc}") from exc
+            raise _bad_json_error("detect_schedule", raw, exc) from exc
         try:
             tool = ScheduleTool.model_validate(data)
         except ValidationError as exc:
@@ -509,7 +511,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM review JSON invalid: {exc}") from exc
+            raise _bad_json_error("review_segment", raw, exc) from exc
         try:
             verdict = ReviewSegmentTool.model_validate(data)
         except ValidationError as exc:
@@ -555,7 +557,7 @@ class OllamaVisionClient(VLMClient):
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise VLMError(f"VLM refine JSON invalid: {exc}") from exc
+            raise _bad_json_error("refine_segment", raw, exc) from exc
         try:
             refined = RefineSegmentTool.model_validate(data)
         except ValidationError as exc:
@@ -584,6 +586,26 @@ class OllamaVisionClient(VLMClient):
 
 
 # ── Pure helpers (testable without a live Ollama). ───────────────────────────
+
+
+def _bad_json_error(label: str, raw: str, exc: Exception) -> VLMError:
+    """Build a VLMError for a JSON parse failure, logging the raw body.
+
+    Cloud VLMs (qwen3-vl:235b-cloud especially under load) sometimes
+    return empty bodies, partial markdown, or error envelopes when they
+    can't honour ``format: "json"``. The previous behaviour swallowed
+    the body and surfaced only ``Expecting value: line 1 column 1`` —
+    diagnostic-hostile. Now we log the body (truncated to 500 chars,
+    empty rendered as ``<empty>``) before raising so the next time it
+    fails we can see whether the model returned nothing, returned
+    prose, or returned a wrapped error.
+    """
+    snippet = raw[:500] if raw else "<empty>"
+    logger.warning(
+        "vlm.%s: JSON parse failed: %s | raw response (truncated 500): %r",
+        label, exc, snippet,
+    )
+    return VLMError(f"VLM {label} JSON invalid: {exc}")
 
 
 def _load_prompt(version: str) -> str:
