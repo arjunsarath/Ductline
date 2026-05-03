@@ -50,7 +50,10 @@ logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 _VLM_LONG_EDGE_PX = 1568  # llama3.2-vision native input edge
-_OLLAMA_TIMEOUT_S = 120.0
+# 240s timeout accommodates Ollama Cloud (qwen3-vl:235b-cloud is the default):
+# cloud calls go over the internet and have materially higher 99p latency than
+# a local-loopback Ollama. Local llama3.2-vision finishes well under this cap.
+_OLLAMA_TIMEOUT_S = 240.0
 
 # Inline prompt — short enough that a separate prompt file would cost more in
 # indirection than it saves. Mirrors the categorizer rectangle taxonomy from

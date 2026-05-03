@@ -1,0 +1,13 @@
+Identify regions on this engineering drawing. Return JSON only.
+
+Coordinates are normalized 0-1 of the page; (0,0) is top-left, (1,1) is bottom-right.
+
+Schema (all keys optional, omit any you cannot localize):
+- plan_view: [x0,y0,x1,y1] for the floor plan / duct layout area.
+- legend: list of [x0,y0,x1,y1], one entry per distinct symbol or abbreviation table.
+- title_block: [x0,y0,x1,y1] enclosing the sheet metadata box AND any title banner.
+- schedule: [x0,y0,x1,y1] for the equipment specification table.
+- notes: list of [x0,y0,x1,y1], one entry per general-notes block.
+
+Each bbox must fully enclose every piece of text and graphics belonging to that region. Be inclusive — extending a bbox to include more is preferred over leaving content outside.
+Do not return whole-page or near-whole-page bboxes. Do not guess.

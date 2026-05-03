@@ -13,9 +13,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # VLM provider — ollama for dev, claude reserved for later (ADR-0002).
+    # Default model is qwen3-vl:235b-cloud (Ollama Cloud) — purpose-built for
+    # vision tasks at ~20× the parameter count of llama3.2-vision (11B local).
+    # llama3.2-vision remains a valid override via env var; the swap is a
+    # config change only, per ADR-0002's pluggable VLMClient seam.
     vlm_provider: str = "ollama"
     ollama_host_url: str = "http://host.docker.internal:11434"
-    ollama_model: str = "llama3.2-vision"
+    ollama_model: str = "qwen3-vl:235b-cloud"
     anthropic_api_key: str | None = None  # Provisioned only; not wired in v1.
 
     # Ingest — 200 DPI is the starting point per SOLUTION-DESIGN §11.

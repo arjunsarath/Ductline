@@ -1,0 +1,8 @@
+Identify the bounding box of the equipment or fixture specification table. Return JSON only.
+
+Coordinates are normalized 0-1 of the page; (0,0) is top-left.
+
+Schema:
+{"bbox": [x0, y0, x1, y1]}   or   {"bbox": null}
+
+A schedule is a multi-row table with columns of duct sizes, equipment IDs, CFM ratings, or fixture specs. Do NOT confuse it with the legend (symbol key) or notes (prose paragraphs). If the drawing has no schedule, return null.
