@@ -83,7 +83,12 @@ export function TilePreview({
       </header>
 
       {coordSpace === "pdf_points" && file ? (
-        <PdfTileCanvas file={file} tileRect={tileRect} dpi={plan.dpi} />
+        <PdfTileCanvas
+          file={file}
+          tileRect={tileRect}
+          dpi={plan.dpi}
+          rotation={plan.rotation_applied}
+        />
       ) : rasterDataUrl ? (
         <RasterTileCrop dataUrl={rasterDataUrl} tileRect={tileRect} />
       ) : (
@@ -104,10 +109,12 @@ function PdfTileCanvas({
   file,
   tileRect,
   dpi,
+  rotation,
 }: {
   file: File;
   tileRect: [number, number, number, number];
   dpi: number;
+  rotation: 0 | 90 | 180 | 270;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,11 +132,11 @@ function PdfTileCanvas({
         const page = await pdf.getPage(1);
         if (cancelled) return;
 
-        // PDF.js viewport scale = pixels per PDF point. dpi/72 puts the
-        // tile at the model's render DPI exactly.
+        // dpi/72 = pixels per PDF point. Rotation must match the backend's
+        // baked-in rotation so tile rects (in rotated-page coords) line up.
         const scale = dpi / 72;
         const [x0, y0, x1, y1] = tileRect;
-        const viewport = page.getViewport({ scale });
+        const viewport = page.getViewport({ scale, rotation });
 
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -186,7 +193,7 @@ function PdfTileCanvas({
         }
       }
     };
-  }, [file, tileRect, dpi]);
+  }, [file, tileRect, dpi, rotation]);
 
   if (error) {
     return <div className="tile-preview-error">{error}</div>;

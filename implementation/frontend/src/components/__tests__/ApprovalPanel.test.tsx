@@ -221,6 +221,7 @@ function tilingPayload(): TilingApprovalPayload {
     coord_space: "pixels",
     source_size: [4000, 3000],
     raster_probe_data_url: "data:image/png;base64,iVBORw0KGgo=",
+    rotation_applied: 0,
     plan_view: [0, 0, 4000, 3000],
     dpi: 200,
     tile_px: 1100,

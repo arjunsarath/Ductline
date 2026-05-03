@@ -45,6 +45,9 @@ export interface TilingApprovalPayload {
    *  off this rather than the encoded image's pixel dimensions. */
   source_size: [number, number];
   raster_probe_data_url: string;
+  /** CW rotation baked into the backend's per-tile renders. PDF.js
+   *  previews must apply the same rotation to match what the model sees. */
+  rotation_applied: 0 | 90 | 180 | 270;
   plan_view: [number, number, number, number];
   dpi: number;
   tile_px: number;
