@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.api.deps import get_pipeline
 from app.api.sessions import registry as session_registry
 from app.api.sse import stream_detect
+from app.config import settings
 from app.pipeline.base import PipelineError
 from app.pipeline.runner import DetectionPipeline
 from app.schemas import DrawingResult, SampleDrawing
@@ -27,6 +28,17 @@ router = APIRouter()
 
 _SAMPLES_DIR = Path("/drawings")
 _SAMPLE_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+
+
+@router.get("/config")
+def get_config() -> dict:
+    """Surface runtime config the frontend needs to display.
+
+    Currently only the active VLM model name (env-overridable via
+    OLLAMA_MODEL) — the upload view's status pill displays this so the
+    user always sees which model their backend is talking to.
+    """
+    return {"vlm_model": settings.ollama_model}
 
 
 @router.post("/detect")

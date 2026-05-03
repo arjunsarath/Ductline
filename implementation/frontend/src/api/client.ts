@@ -193,6 +193,18 @@ function parseSseRecord(
   }
 }
 
+/** Fetch runtime backend config — currently the active VLM model name.
+ *
+ *  Surfaced in the upload-view status pill so the user always sees which
+ *  model the backend is actually using (env override may differ from the
+ *  default). Falls back to a generic label on network failure rather than
+ *  blocking the page. */
+export async function getConfig(): Promise<{ vlm_model: string }> {
+  const response = await fetch("/api/config");
+  if (!response.ok) throw new Error(`config failed (${response.status})`);
+  return (await response.json()) as { vlm_model: string };
+}
+
 export async function listSamples(): Promise<SampleDrawing[]> {
   const response = await fetch("/api/samples");
   if (!response.ok) throw new Error(`samples failed (${response.status})`);

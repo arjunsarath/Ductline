@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchSample, listSamples } from "../api/client";
+import { fetchSample, getConfig, listSamples } from "../api/client";
 import type { SampleDrawing } from "../types/api";
 import { Brand } from "./Brand";
 import { Stepper } from "./Stepper";
@@ -22,6 +22,24 @@ export function UploadView({ onFile, errorMessage }: Props) {
   const [showSamples, setShowSamples] = useState(false);
   const [samples, setSamples] = useState<SampleDrawing[] | null>(null);
   const [samplesError, setSamplesError] = useState<string | null>(null);
+  // Active VLM model name — fetched from /api/config on mount so the
+  // status pill reflects whatever the backend is actually using
+  // (env-overridable; default is qwen3-vl:235b-cloud per V2 §10).
+  const [vlmModel, setVlmModel] = useState<string>("loading…");
+
+  useEffect(() => {
+    let cancelled = false;
+    getConfig()
+      .then((cfg) => {
+        if (!cancelled) setVlmModel(cfg.vlm_model);
+      })
+      .catch(() => {
+        if (!cancelled) setVlmModel("vlm offline");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!showSamples || samples !== null) return;
@@ -78,7 +96,7 @@ export function UploadView({ onFile, errorMessage }: Props) {
           <a className="topbar-link" href="#benchmark">
             Benchmark drawings
           </a>
-          <span className="topbar-pill">● llama3.2-vision</span>
+          <span className="topbar-pill">● {vlmModel}</span>
         </nav>
       </header>
 
