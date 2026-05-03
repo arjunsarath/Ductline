@@ -147,6 +147,25 @@ _VLM_REGION_MIN_AREA = 0.01
 _VLM_REGION_MAX_AREA = 0.99
 _VLM_PLAN_VIEW_PAGE_BOUNDS_TOL = 0.05
 
+# Backend hallucination guard for the small-VLM auxiliary path.
+#
+# Manual testing on llama3.2-vision exposed a failure mode where every
+# auxiliary detector returns a plausible-looking bbox, but the bboxes are
+# all clustered at the same spot (typically the top-left corner). The
+# focused prompts each succeed in isolation — none of the per-call
+# plausibility guards (sub-1% / super-99% / page-bounds) catch this — yet
+# the result is meaningless: title / legend / schedule / notes can't all
+# share the same rectangle.
+#
+# We detect the cluster by computing pairwise IoU across every auxiliary
+# bbox the four detectors produced. If any pair exceeds this threshold
+# we drop the entire VLM-first result and fall through to the heuristic.
+# 0.3 is permissive enough that legitimately-near auxiliaries (e.g. legend
+# + notes column adjacent on the right edge) don't trip it, but tight
+# enough that the "all four bboxes stacked at top-left" pattern reliably
+# rejects.
+_VLM_AUX_OVERLAP_REJECT_IOU = 0.3
+
 # Plan-view derivation tunables (SOLUTION-DESIGN-V2 §5.3, third revision).
 #
 # The auxiliary-first VLM-first path identifies title / legend / notes /
@@ -303,6 +322,26 @@ class PageCategorizerStage(PipelineStage):
             len(notes_tool.bboxes) if notes_tool else 0,
             "yes" if (schedule_tool and schedule_tool.bbox) else "no",
         )
+
+        # Backend hallucination guard: if any pair of auxiliaries overlap
+        # heavily the VLM almost certainly clustered every detector at the
+        # same spot. Reject the whole VLM result and fall through to the
+        # heuristic — same posture as the per-call plausibility guards.
+        overlap_pair = _pairwise_overlap_above(
+            aux_normalized, _VLM_AUX_OVERLAP_REJECT_IOU
+        )
+        if overlap_pair is not None:
+            a, b, iou = overlap_pair
+            logger.warning(
+                "page_categorize: vlm-first: rejecting result — auxiliary bboxes "
+                "%s and %s have IoU %.2f > %.2f (clustered hallucination); "
+                "falling back to heuristic",
+                tuple(round(v, 3) for v in a),
+                tuple(round(v, 3) for v in b),
+                iou,
+                _VLM_AUX_OVERLAP_REJECT_IOU,
+            )
+            return None
 
         derived_plan = _derive_plan_view_normalized(aux_normalized)
         if derived_plan is None:
@@ -666,6 +705,56 @@ def _normalized_bbox_area(bbox: tuple[float, float, float, float]) -> float:
     """Area of an [x0, y0, x1, y1] bbox in normalized [0, 1] coords."""
     x0, y0, x1, y1 = bbox
     return max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
+
+
+def _normalized_iou(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    """Intersection-over-union for two normalized [0, 1] bboxes.
+
+    Returns 0.0 if either bbox is degenerate or the boxes do not overlap.
+    Used by the auxiliary-overlap guard to detect clustered VLM
+    hallucinations (every auxiliary returned the same rect).
+    """
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0 = max(ax0, bx0)
+    iy0 = max(ay0, by0)
+    ix1 = min(ax1, bx1)
+    iy1 = min(ay1, by1)
+    inter = max(ix1 - ix0, 0.0) * max(iy1 - iy0, 0.0)
+    if inter <= 0.0:
+        return 0.0
+    union = _normalized_bbox_area(a) + _normalized_bbox_area(b) - inter
+    if union <= 0.0:
+        return 0.0
+    return inter / union
+
+
+def _pairwise_overlap_above(
+    bboxes: list[tuple[float, float, float, float]],
+    threshold: float,
+) -> tuple[
+    tuple[float, float, float, float],
+    tuple[float, float, float, float],
+    float,
+] | None:
+    """Find the first pair of bboxes whose IoU exceeds ``threshold``.
+
+    Returns ``(a, b, iou)`` for the offending pair, or ``None`` if no such
+    pair exists (including the trivial ``len < 2`` case). The caller logs
+    the offending pair before falling back to the heuristic.
+    """
+    n = len(bboxes)
+    if n < 2:
+        return None
+    for i in range(n):
+        for j in range(i + 1, n):
+            iou = _normalized_iou(bboxes[i], bboxes[j])
+            if iou > threshold:
+                return bboxes[i], bboxes[j], iou
+    return None
 
 
 def _is_plan_view_bbox_plausible(

@@ -962,3 +962,50 @@ def test_nearest_edge_picks_smallest_distance() -> None:
     assert _nearest_edge((0.10, 0.00, 0.90, 0.10)) == "top"
     assert _nearest_edge((0.10, 0.90, 0.90, 1.00)) == "bottom"
     assert _nearest_edge((0.95, 0.10, 1.00, 0.90)) == "right"
+
+
+def test_vlm_first_falls_back_on_overlapping_auxiliaries(caplog) -> None:  # type: ignore[no-untyped-def]
+    """All four auxiliary bboxes clustered at the same spot → heuristic runs.
+
+    Manual benchmarking on llama3.2-vision exposed a hallucination mode
+    where every focused detector returns a plausible-looking bbox, but
+    every bbox is clamped to roughly the top-left corner. Each per-call
+    plausibility guard (sub-1% / super-99% / page-bounds) sees nothing
+    wrong; the result is meaningless. The pairwise-IoU guard catches it
+    by flagging any pair with IoU > 0.3 and rejecting the whole VLM
+    result, falling through to the heuristic exactly like other guards.
+    """
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        # Heuristic fixture so the fallback can produce a useful layout.
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+    # Every detector returns a near-identical top-left bbox (IoU 1.0).
+    # Title and legend alone are enough to trip the pairwise guard.
+    clustered = (0.02, 0.02, 0.20, 0.20)
+    vlm = _StubVLM(
+        title_block_result=TitleBlockTool(bbox=clustered),
+        legend_result=LegendRegionTool(bboxes=[clustered]),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.categorize"):
+        PageCategorizerStage(vlm).run(ctx)
+
+    # Heuristic ran — left-half plan_view from the MECHANICAL PLAN keyword.
+    assert ctx.layout is not None
+    px0, _, px1, _ = ctx.layout.plan_view
+    assert px0 <= 100 < px1
+    # The VLM auxiliaries were NOT surfaced into the layout — the whole
+    # VLM result was rejected before plan_view derivation, so layout
+    # fields come from the heuristic path (title_block from lower-right).
+    assert ctx.layout.legend is None
+    # A WARNING was logged identifying the offending pair.
+    overlap_records = [
+        r for r in caplog.records if "clustered hallucination" in r.getMessage()
+    ]
+    assert overlap_records, (
+        "expected WARNING naming the overlapping auxiliary pair"
+    )

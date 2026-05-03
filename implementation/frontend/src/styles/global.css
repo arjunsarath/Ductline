@@ -784,6 +784,81 @@ a {
   word-break: break-all;
 }
 
+/* Categorize gate interactive editor — handles, delete X, toolbar, draw banner. */
+.approval-overlay--drawing {
+  cursor: crosshair;
+}
+.bbox-handle {
+  pointer-events: all;
+  /* Slightly darker hover affordance — the inline fill is the region
+     stroke; on hover we stamp a brighter outline to indicate grab. */
+}
+.bbox-handle:hover {
+  stroke: var(--text-strong, #0F1115);
+}
+.bbox-handle--corner {
+  /* Marker class — selectors target this for cursor-specific styling
+     in tests and future hover treatments. The cursor itself is set
+     inline because it varies by handle position. */
+}
+.bbox-handle--edge {
+  /* Same — inline cursor; class kept as a semantic hook. */
+}
+.bbox-delete-x {
+  pointer-events: all;
+}
+.bbox-delete-x:hover circle {
+  fill: #B91C1C;
+}
+.bbox-draw-preview {
+  pointer-events: none;
+}
+.approval-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 32px;
+  border-bottom: 1px solid var(--border-subtle, #E5E1D6);
+  background: var(--bg-subtle, #FAFAF7);
+  flex-wrap: wrap;
+}
+.approval-toolbar-spacer {
+  flex: 1;
+}
+.approval-toolbar-button {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle, #E5E1D6);
+  background: var(--bg-elevated, #FFFFFF);
+  color: var(--text-strong, #0F1115);
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+.approval-toolbar-button:hover {
+  background: #F0EFE9;
+}
+.approval-toolbar-button--active {
+  background: #FEF3C7;
+  border-color: #F59E0B;
+}
+.draw-mode-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 32px;
+  background: #FEF3C7;
+  border-top: 1px solid #F59E0B;
+  border-bottom: 1px solid #F59E0B;
+  font-size: 13px;
+  color: #78350F;
+}
+.button-small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 /* Live tile preview at 100% during the tile-detect phase. */
 .tile-preview {
   position: fixed;

@@ -34,11 +34,20 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 # Optional approval-gate callback for human-in-the-loop pauses. Stages that
 # emit a gate (``categorize``, ``tiling``) call ``ctx.approval_gate(gate_name,
-# payload)`` and block until the SSE bridge's session is approved. Returns
-# True on approval, False on timeout. Cancellation raises (the runner lets
-# it propagate as a degradation). When ``ctx.approval_gate is None`` the
-# pipeline runs to completion without pausing — that's the test path.
-ApprovalGateCallback = Callable[[str, dict[str, Any]], bool]
+# payload)`` and block until the SSE bridge's session is approved. The
+# callback returns:
+#
+#   • ``None`` on timeout / cancellation — the runner treats this as a
+#     degradation and aborts the post-gate stages with an error entry.
+#   • a ``dict`` on approval. The dict is the corrections payload the
+#     client POSTed to the approve endpoint (see app.api.routes). An
+#     empty dict means "approve as-is, no corrections"; a dict with a
+#     ``layout`` key carries inline edits (categorize gate only).
+#
+# Cancellation raises (the runner lets it propagate as a degradation).
+# When ``ctx.approval_gate is None`` the pipeline runs to completion
+# without pausing — that's the test path.
+ApprovalGateCallback = Callable[[str, dict[str, Any]], dict[str, Any] | None]
 
 
 # ── Exceptions surfaced as HTTP errors by app.api.routes (§9). ────────────────
@@ -150,7 +159,8 @@ class PipelineContext:
     # Human-in-the-loop approval gate (V2 §5.8). Set by DetectionPipeline.run()
     # when a session is supplied. Stages call ``ctx.approval_gate(name, payload)``
     # to pause execution until the SSE bridge gets a POST /approve/{name}.
-    # Returns True on approval, False on timeout. Stages must tolerate None.
+    # Returns the corrections dict on approval (empty dict if none) or
+    # ``None`` on timeout/cancel. Stages must tolerate ``None`` callback.
     approval_gate: ApprovalGateCallback | None = None
 
 

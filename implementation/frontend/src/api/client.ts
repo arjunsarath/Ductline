@@ -199,19 +199,51 @@ export async function listSamples(): Promise<SampleDrawing[]> {
   return (await response.json()) as SampleDrawing[];
 }
 
+/** Inline-correction payload for the categorize approval gate.
+ *
+ *  Coordinates are in the same source-coord space the categorize approval
+ *  payload was emitted in (RectPt) — the editor renders the SVG in source-
+ *  space viewBox so no conversion is needed.
+ *
+ *  Field semantics (every field optional in the wire shape — runner reads
+ *  only known keys):
+ *    • plan_view: edited rect, or null to delete (runner substitutes
+ *      whole-page rect — pipeline never accepts a None plan_view).
+ *    • legend / schedule / title_block: edited rect, or null to delete.
+ *    • notes: replacement list — empty list clears notes.
+ */
+export interface CategorizeCorrections {
+  layout: {
+    plan_view: [number, number, number, number] | null;
+    legend: [number, number, number, number] | null;
+    schedule: [number, number, number, number] | null;
+    title_block: [number, number, number, number] | null;
+    notes: Array<[number, number, number, number]>;
+  };
+}
+
 /** Release a HITL approval gate. Resolves with the server's ack on 200,
- *  rejects on any non-2xx (including 404 — session already finished). */
+ *  rejects on any non-2xx (including 404 — session already finished).
+ *
+ *  ``corrections`` is optional and only meaningful for the categorize
+ *  gate today. When provided it's sent as the JSON request body; the
+ *  runner reads it and rewrites ``ctx.layout`` before legend_parse
+ *  runs. The tiling gate ignores any body. */
 export async function approveGate(
   drawingId: string,
   gate: "categorize" | "tiling",
+  corrections?: CategorizeCorrections,
 ): Promise<void> {
+  const body = corrections === undefined ? "{}" : JSON.stringify(corrections);
   const response = await fetch(
     `/api/detect/${encodeURIComponent(drawingId)}/approve/${gate}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+    { method: "POST", headers: { "Content-Type": "application/json" }, body },
   );
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`approve ${gate} failed (${response.status}): ${body}`);
+    const responseBody = await response.text();
+    throw new Error(
+      `approve ${gate} failed (${response.status}): ${responseBody}`,
+    );
   }
 }
 

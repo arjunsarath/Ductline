@@ -82,11 +82,17 @@ async def stream_detect(
         # documented way to bridge a sync thread → asyncio loop.
         loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
-    def approval_gate(gate: str, payload: dict[str, Any]) -> bool:
-        """HITL pause point — emit awaiting_* event, block until approved."""
+    def approval_gate(gate: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """HITL pause point — emit awaiting_* event, block until approved.
+
+        Returns the corrections payload the client POSTed to the approve
+        endpoint (empty dict if none) on approval, or ``None`` on timeout.
+        Cancellation surfaces as ``SessionCancelled`` from
+        ``wait_for_approval`` — re-raised so the pipeline runner sees it.
+        """
         progress_callback(f"awaiting_{gate}_approval", payload)
         try:
-            return session.wait_for_approval(  # type: ignore[arg-type]
+            approved = session.wait_for_approval(  # type: ignore[arg-type]
                 gate,  # type: ignore[arg-type]
                 timeout=_APPROVAL_TIMEOUT_S,
             )
@@ -95,6 +101,13 @@ async def stream_detect(
             # thread — the runner catches it, marks ctx.errors, and the
             # main except below converts it to an SSE error event.
             raise
+        if not approved:
+            return None
+        # Approved — the client may have submitted inline corrections via
+        # the POST body. ``approval_payloads`` was always reserved for
+        # this; v1 of HITL kept it None, v2 (this PR) populates it. An
+        # approve with no body stores nothing → empty dict back.
+        return session.approval_payloads.get(gate, {})  # type: ignore[arg-type]
 
     def run_pipeline() -> Any:
         try:

@@ -175,7 +175,13 @@ class TiledDuctDetectionStage(PipelineStage):
                     for tile_rect, row, col, total_rows, total_cols in tiles
                 ],
             }
-            if not ctx.approval_gate("tiling", payload):
+            # Tiling gate has no inline-correction UI; the dict body is
+            # ignored on approval. ``None`` means timeout / cancel — abort
+            # the tile loop with an error rather than silently continuing.
+            # An empty corrections dict still counts as approval, so the
+            # check explicitly compares to None rather than relying on
+            # truthiness (an empty dict is falsy).
+            if ctx.approval_gate("tiling", payload) is None:
                 logger.warning(
                     "tiled_detect: tiling gate timed out; aborting tile loop"
                 )

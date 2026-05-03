@@ -24,12 +24,14 @@ from app.pipeline.classify import PressureClassClassifier
 from app.pipeline.detect_tiled import TiledDuctDetectionStage
 from app.pipeline.extract import TextExtractionStage
 from app.pipeline.ingest import IngestStage
+from app.pipeline.layout import PageLayout
 from app.pipeline.legend import LegendParserStage
 from app.pipeline.probe_ocr import ProbeOCRStage
 from app.pipeline.quality import QualityCheckStage
 from app.pipeline.regions import RegionDetectStage
 from app.pipeline.review import ReviewerStage
 from app.schemas import DrawingResult
+from app.source.base import RectPt
 from app.vlm.base import VLMClient
 
 logger = logging.getLogger(__name__)
@@ -108,13 +110,20 @@ class DetectionPipeline:
                     and ctx.approval_gate is not None
                 ):
                     payload = _serialise_layout_for_approval(ctx)
-                    if not ctx.approval_gate("categorize", payload):
+                    corrections = ctx.approval_gate("categorize", payload)
+                    if corrections is None:
                         # Timeout (cancellation raises) — abort the run with
                         # a clear error rather than silently continuing.
                         ctx.errors.append(
                             "approval timeout: categorize gate not approved"
                         )
                         break
+                    layout_corrections = corrections.get("layout")
+                    if layout_corrections is not None:
+                        # The user edited the layout in the approval panel.
+                        # Apply the corrections before legend_parse runs so
+                        # downstream stages see the edited rects.
+                        _apply_layout_corrections(ctx, layout_corrections)
 
             result = assemble_result(ctx)
             if progress is not None:
@@ -213,6 +222,142 @@ def _raster_probe_data_url(ctx: PipelineContext) -> str:
     image.save(buf, format="PNG", optimize=True)
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+# Fields on PageLayout that the categorize approval gate is allowed to
+# correct. Anything outside this set in the corrections dict is dropped —
+# unknown keys are not load-bearing in the pipeline schema and silently
+# ignoring them is safer than blowing up on a forward-compatible client
+# that ships extra metadata.
+_LAYOUT_CORRECTION_FIELDS = ("plan_view", "legend", "schedule", "title_block", "notes")
+
+
+def _coerce_rect(value: object) -> RectPt | None:
+    """Coerce a corrections-payload value to a RectPt, or None.
+
+    Accepts ``None`` (passthrough), or a 4-element list/tuple of numbers.
+    Returns ``None`` for any other shape — the caller treats ``None`` as
+    "this field was deleted" or "this field was not edited" depending on
+    whether the key was present in the original corrections dict.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list | tuple) or len(value) != 4:
+        return None
+    try:
+        return (
+            float(value[0]),
+            float(value[1]),
+            float(value[2]),
+            float(value[3]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _whole_page_rect_from_ctx(ctx: PipelineContext) -> RectPt:
+    """Whole-page rect in the source's coord space — mirror of the §7
+    categorizer-failed fallback. Used when corrections delete plan_view."""
+    assert ctx.source is not None, "approval gate fired before ingest produced source"
+    if ctx.source.kind == "vector_pdf" and ctx.source.page_size_pt is not None:
+        w, h = ctx.source.page_size_pt
+        return (0.0, 0.0, float(w), float(h))
+    w_px, h_px = ctx.source.raster_probe.size
+    return (0.0, 0.0, float(w_px), float(h_px))
+
+
+def _apply_layout_corrections(
+    ctx: PipelineContext, layout_dict: dict
+) -> None:
+    """Replace fields on ``ctx.layout`` from a frontend corrections payload.
+
+    The corrections dict is whatever the approval-panel editor sent in
+    the POST body's ``layout`` key. Coordinates arrive in the same
+    source-coord space the approval payload was emitted in (RectPt),
+    so no conversion is needed.
+
+    Schema (every key optional):
+        {
+          "plan_view":  [x0, y0, x1, y1] | null,
+          "legend":     [x0, y0, x1, y1] | null,
+          "schedule":   [x0, y0, x1, y1] | null,
+          "title_block":[x0, y0, x1, y1] | null,
+          "notes":      [[x0, y0, x1, y1], ...]
+        }
+
+    Behaviour:
+      • Unknown top-level keys are dropped (logged).
+      • Malformed rect values are dropped (logged) — the field keeps
+        whatever it had before corrections were applied.
+      • ``plan_view: null`` (or absent) explicitly deletes plan_view by
+        replacing it with the whole-page rect — same posture as the
+        §7 categorizer-failed fallback. The pipeline's downstream
+        contract is that ``layout.plan_view`` is non-None.
+      • ``notes`` is a list — a missing key leaves notes unchanged; an
+        empty list clears notes; well-formed entries replace the list.
+    """
+    if not isinstance(layout_dict, dict):
+        logger.warning(
+            "approve(categorize): ignoring non-dict layout corrections (%r)",
+            type(layout_dict).__name__,
+        )
+        return
+
+    if ctx.layout is None:
+        # Categorizer was skipped or degraded; we still want to honour the
+        # corrections (the user may have drawn rects on the whole-page
+        # fallback). Build a minimal layout from the whole page so the
+        # field updates have somewhere to land.
+        ctx.layout = PageLayout(plan_view=_whole_page_rect_from_ctx(ctx))
+
+    unknown_keys = [k for k in layout_dict if k not in _LAYOUT_CORRECTION_FIELDS]
+    if unknown_keys:
+        logger.info(
+            "approve(categorize): dropping unknown layout keys %s",
+            unknown_keys,
+        )
+
+    # plan_view: null / absent → whole-page fallback. A user who deletes
+    # the plan_view rect is signalling "I don't know"; the pipeline never
+    # tolerates a None plan_view so the runner substitutes the page rect.
+    if "plan_view" in layout_dict:
+        coerced = _coerce_rect(layout_dict["plan_view"])
+        if coerced is None:
+            ctx.layout.plan_view = _whole_page_rect_from_ctx(ctx)
+            logger.info(
+                "approve(categorize): plan_view deleted by user — using whole-page fallback"
+            )
+        else:
+            ctx.layout.plan_view = coerced
+
+    for field_name in ("legend", "schedule", "title_block"):
+        if field_name in layout_dict:
+            setattr(ctx.layout, field_name, _coerce_rect(layout_dict[field_name]))
+
+    if "notes" in layout_dict:
+        raw_notes = layout_dict["notes"]
+        if isinstance(raw_notes, list):
+            corrected_notes: list[RectPt] = []
+            for entry in raw_notes:
+                rect = _coerce_rect(entry)
+                if rect is not None:
+                    corrected_notes.append(rect)
+            ctx.layout.notes = corrected_notes
+        else:
+            logger.info(
+                "approve(categorize): ignoring non-list notes corrections (%r)",
+                type(raw_notes).__name__,
+            )
+
+    logger.info(
+        "approve(categorize): applied corrections — plan_view=%s legend=%s "
+        "schedule=%s title_block=%s notes=%d",
+        ctx.layout.plan_view,
+        ctx.layout.legend,
+        ctx.layout.schedule,
+        ctx.layout.title_block,
+        len(ctx.layout.notes),
+    )
 
 
 # TYPE_CHECKING used solely to silence linters that warn on unused imports —
