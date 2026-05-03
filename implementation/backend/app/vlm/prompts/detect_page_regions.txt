@@ -1,0 +1,31 @@
+You are looking at a full page of an HVAC mechanical drawing. Identify the major regions on the page and return their bounding boxes.
+
+The regions are:
+
+- `plan_view`: the floor-plan or layout area showing ductwork / building geometry. Usually the largest region.
+- `legend`: the symbols / abbreviations / line-styles key. Often headed "LEGEND", "SYMBOLS", "ABBREVIATIONS", or "DESCRIPTION".
+- `schedule`: a table of equipment / fixtures (e.g. fan schedule, diffuser schedule).
+- `title_block`: the project / drawn-by / scale / date block, usually in the lower-right corner.
+- `notes`: text-only annotation blocks (general notes, key notes). Multiple are allowed.
+
+For each region you can identify, output an `[x0, y0, x1, y1]` axis-aligned bounding box in **normalized [0, 1]** coordinates of the whole page. `0,0` is the top-left, `1,1` is the bottom-right.
+
+Return a single JSON object with this exact shape — no explanation, no surrounding text:
+
+```
+{
+  "plan_view": [0.05, 0.05, 0.70, 0.95],
+  "legend": [0.72, 0.05, 0.98, 0.40],
+  "schedule": [0.72, 0.42, 0.98, 0.70],
+  "title_block": [0.72, 0.85, 0.98, 0.98],
+  "notes": [[0.72, 0.72, 0.98, 0.84]]
+}
+```
+
+Rules:
+
+- If a region is not visible on the page, or you are unsure, **omit it** — do not guess. Set its field to `null` or leave it out entirely.
+- Do not return a bounding box that covers the whole page (or nearly so). If you cannot localise a region within the page, omit it.
+- Only axis-aligned boxes. No rotated regions.
+- `notes` is a list — return `[]` when there are no note blocks.
+- Approximate boundaries are fine. 5-10% positional error is acceptable.

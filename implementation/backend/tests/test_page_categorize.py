@@ -32,7 +32,8 @@ from app.pipeline.categorize import (
     _select_plan_view,
 )
 from app.source.base import DrawingSource
-from app.vlm.tools import CategorizePageTool, DetectionResult
+from app.vlm.base import VLMError
+from app.vlm.tools import CategorizePageTool, DetectionResult, PageRegionsTool
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -40,16 +41,31 @@ from app.vlm.tools import CategorizePageTool, DetectionResult
 class _StubVLM:
     """VLMClient stub — categorize_region returns a preset value or raises.
 
+    ``detect_page_regions`` is also stubbed: by default it returns a tool
+    with ``plan_view=None``, which the categorizer treats as "VLM didn't
+    localise a plan view" and falls through to the heuristic. Tests that
+    want to exercise the VLM-first happy path pass ``page_regions_result``
+    or ``raise_on_page_regions``.
+
     detect / disambiguate_region exist only to satisfy the Protocol; tests
     here never call them.
     """
 
     def __init__(
-        self, *, categorize_kind: str = "unknown", raise_on_categorize: bool = False
+        self,
+        *,
+        categorize_kind: str = "unknown",
+        raise_on_categorize: bool = False,
+        page_regions_result: PageRegionsTool | None = None,
+        raise_on_page_regions: bool = False,
     ) -> None:
         self._kind = categorize_kind
         self._raise = raise_on_categorize
+        self._page_regions_result = page_regions_result
+        self._raise_on_page_regions = raise_on_page_regions
         self.call_count = 0
+        self.page_regions_call_count = 0
+        self.heuristic_invoked = False
 
     def detect(self, image: Image.Image, *, prompt_version: str = "v1") -> DetectionResult:
         del image, prompt_version
@@ -65,6 +81,16 @@ class _StubVLM:
         if self._raise:
             raise RuntimeError("vlm offline")
         return CategorizePageTool(region_kind=self._kind)  # type: ignore[arg-type]
+
+    def detect_page_regions(self, image: Image.Image) -> PageRegionsTool:
+        del image
+        self.page_regions_call_count += 1
+        if self._raise_on_page_regions:
+            raise VLMError("stub: detect_page_regions raised")
+        if self._page_regions_result is not None:
+            return self._page_regions_result
+        # Default — no plan view → categorizer falls back to the heuristic.
+        return PageRegionsTool()
 
 
 # ── Fixture builders ─────────────────────────────────────────────────────────
@@ -578,3 +604,130 @@ def test_plan_view_largest_when_side_by_side() -> None:
 
     assert picked == right  # largest by area
     assert "multi_plan_view_detected" in ctx.errors
+
+
+# ── VLM-first page categorization (SOLUTION-DESIGN-V2 §5.3 refactor) ─────────
+
+
+def test_vlm_first_populates_layout_when_returns_valid() -> None:
+    """Stub returns a sensible PageRegionsTool → layout matches; heuristic
+    is NOT consulted. The OCR cache is intentionally empty (which would
+    force the heuristic to fall back to whole-page) so we can prove the
+    VLM-first path bypassed the heuristic entirely.
+    """
+    img = _blank_image(800, 600)
+    src = _raster_source(img)
+    # Empty OCR cache: if the heuristic ran, it would fall back to whole-
+    # page plan_view. The VLM-first result must override that.
+    ctx = _ctx_with(src, _ocr_cache([]))
+    vlm = _StubVLM(
+        page_regions_result=PageRegionsTool(
+            plan_view=(0.05, 0.05, 0.70, 0.95),
+            legend=(0.72, 0.05, 0.98, 0.40),
+            schedule=(0.72, 0.42, 0.98, 0.70),
+            title_block=(0.72, 0.85, 0.98, 0.98),
+            notes=[(0.72, 0.72, 0.98, 0.84)],
+        )
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Plan view scaled to source coords (raster source → pixel size).
+    assert ctx.layout.plan_view == (0.05 * 800, 0.05 * 600, 0.70 * 800, 0.95 * 600)
+    assert ctx.layout.legend == (0.72 * 800, 0.05 * 600, 0.98 * 800, 0.40 * 600)
+    assert ctx.layout.schedule is not None
+    assert ctx.layout.title_block is not None
+    assert len(ctx.layout.notes) == 1
+    # The VLM-first path bypasses the heuristic entirely: the no-OCR-matches
+    # whole-page fallback warning would have fired had the heuristic run.
+    assert not any("categorizer_failed" in e for e in ctx.errors)
+    assert vlm.page_regions_call_count == 1
+
+
+def test_vlm_first_falls_back_on_no_plan_view() -> None:
+    """Stub returns plan_view=None → fall through to heuristic."""
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+    # Default stub: plan_view=None → heuristic runs.
+    vlm = _StubVLM()
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Heuristic produced the layout — left-half plan view containing the
+    # MECHANICAL PLAN keyword.
+    px0, py0, px1, py1 = ctx.layout.plan_view
+    assert px0 <= 100 < px1
+    assert py0 <= 100 < py1
+    assert vlm.page_regions_call_count == 1
+
+
+def test_vlm_first_falls_back_on_implausible_layout() -> None:
+    """Stub returns plan_view = whole-page bbox → guard rejects → heuristic."""
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+    vlm = _StubVLM(
+        page_regions_result=PageRegionsTool(
+            # Plan view is essentially the whole page — guard rejects.
+            plan_view=(0.0, 0.0, 1.0, 1.0),
+        )
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Heuristic ran: left-half plan view, NOT the whole-page rect from VLM.
+    px0, _, px1, _ = ctx.layout.plan_view
+    # Whole-page would be (0, 0, 800, 600); the heuristic picks the left
+    # half (~0–400).
+    assert px1 < 600  # not the whole page
+    assert px0 <= 100 < px1
+
+
+def test_vlm_first_falls_back_on_vlm_error() -> None:
+    """Stub raises VLMError → heuristic runs unchanged."""
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+    vlm = _StubVLM(raise_on_page_regions=True)
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Heuristic ran successfully despite VLM raising.
+    px0, py0, px1, py1 = ctx.layout.plan_view
+    assert px0 <= 100 < px1
+    assert py0 <= 100 < py1
+    assert vlm.page_regions_call_count == 1
+
+
+def test_vlm_first_scales_normalized_bboxes_correctly() -> None:
+    """plan_view = (0.1, 0.1, 0.9, 0.9) on 800×600 page → (80, 60, 720, 540)."""
+    img = _blank_image(800, 600)
+    src = _raster_source(img)
+    ctx = _ctx_with(src, _ocr_cache([]))
+    vlm = _StubVLM(
+        page_regions_result=PageRegionsTool(
+            plan_view=(0.1, 0.1, 0.9, 0.9),
+        )
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    assert ctx.layout.plan_view == (80.0, 60.0, 720.0, 540.0)

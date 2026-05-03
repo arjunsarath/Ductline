@@ -31,6 +31,7 @@ from app.vlm.tools import (
     CategorizePageTool,
     DetectDuctsTool,
     DetectionResult,
+    PageRegionsTool,
     RefineSegmentTool,
     ReviewSegmentTool,
     VLMSegment,
@@ -186,6 +187,60 @@ class OllamaVisionClient(VLMClient):
             tool.region_kind,
             crop.width,
             crop.height,
+            time.monotonic() - t0,
+        )
+        return tool
+
+    def detect_page_regions(self, image: Image) -> PageRegionsTool:
+        """VLM-first page categorization (SOLUTION-DESIGN-V2 §5.3).
+
+        Single whole-page call: the model sees the full sheet (downscaled to
+        the model's native input window) and emits one normalized bbox per
+        major region. Same JSON-mode + Pydantic-validate posture as
+        ``categorize_region``; schema failures surface as VLMError so the
+        calling stage can fall back to the heuristic path.
+        """
+        prompt_path = _PROMPTS_DIR / "detect_page_regions.txt"
+        if not prompt_path.exists():
+            raise VLMError("page-regions prompt missing: detect_page_regions.txt")
+        prompt = prompt_path.read_text(encoding="utf-8")
+
+        downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(downscaled)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_page_regions: start image=%dx%d",
+            downscaled.width,
+            downscaled.height,
+        )
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM detect_page_regions")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM page-regions JSON invalid: {exc}") from exc
+        try:
+            tool = PageRegionsTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM page-regions JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+        logger.info(
+            "vlm.detect_page_regions: done plan_view=%s legend=%s schedule=%s "
+            "title_block=%s notes=%d elapsed=%.2fs",
+            tool.plan_view is not None,
+            tool.legend is not None,
+            tool.schedule is not None,
+            tool.title_block is not None,
+            len(tool.notes),
             time.monotonic() - t0,
         )
         return tool

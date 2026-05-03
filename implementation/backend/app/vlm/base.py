@@ -14,7 +14,12 @@ if TYPE_CHECKING:
 
     from app.pipeline.base import VLMSegmentDraft
     from app.pipeline.legend import Legend
-    from app.vlm.tools import CategorizePageTool, DetectionResult, RefineSegmentTool
+    from app.vlm.tools import (
+        CategorizePageTool,
+        DetectionResult,
+        PageRegionsTool,
+        RefineSegmentTool,
+    )
 
 
 class VLMError(Exception):
@@ -27,6 +32,17 @@ class VLMClient(Protocol):
     def disambiguate_region(self, crop: Image, question: str) -> str: ...
 
     def categorize_region(self, crop: Image) -> CategorizePageTool: ...
+
+    def detect_page_regions(self, image: Image) -> PageRegionsTool:
+        """VLM-first page categorization (SOLUTION-DESIGN-V2 §5.3).
+
+        ``image`` is the full-page raster (typically ``ctx.source.raster_probe``
+        at probe DPI). The implementation downscales internally so smaller
+        models stay within their native input window. Returned bboxes are
+        normalized [0, 1] in the page's coord space (post-rotation, pre-tile);
+        the calling stage scales them to ``RectPt``.
+        """
+        ...
 
     def detect_tile(
         self,

@@ -2,9 +2,10 @@
 
 Decomposes the drawing into named regions (title block, schedule, legend,
 notes, plan view) so downstream tiled detect (§5.5) only runs on plan-view
-geometry. Algorithmic-first — Hough-line decomposition + OCR keyword match
-handles the common case; the VLM is called only on rectangles the algorithm
-leaves as ``unknown``.
+geometry. VLM-first: a single whole-page ``detect_page_regions`` call
+returns rough region bboxes. The Hough-line + keyword heuristic stays as a
+fallback, used only when the VLM call errors or its output fails the soft
+plausibility guard.
 
 Locked decisions (SOLUTION-DESIGN-V2 §5.3, §7):
 
@@ -125,6 +126,18 @@ _STRIP_MIN_DIM_FRACTION = 0.45
 _STRIP_ASPECT_RATIO = 6.0
 _STRIP_MERGE_MAX_ITERATIONS = 10
 
+# VLM-first plausibility guard (SOLUTION-DESIGN-V2 §5.3).
+#
+# The VLM may return degenerate output: tiny bboxes (<1% area), page-spanning
+# bboxes (>99% area, indistinguishable from "I don't know"), or a plan_view
+# rect that's effectively the page itself (within 5% of page bounds on every
+# side, which provides no signal beyond the whole-page fallback). Any of
+# these is a signal the call failed informatively; we drop the result and
+# fall through to the heuristic.
+_VLM_REGION_MIN_AREA = 0.01
+_VLM_REGION_MAX_AREA = 0.99
+_VLM_PLAN_VIEW_PAGE_BOUNDS_TOL = 0.05
+
 
 class PageCategorizerStage(PipelineStage):
     name = "page_categorize"
@@ -136,16 +149,89 @@ class PageCategorizerStage(PipelineStage):
 
     def run(self, ctx: PipelineContext) -> PipelineContext:
         try:
-            ctx.layout = self._build_layout(ctx)
+            # VLM-first: one whole-page call gives us rough bboxes for every
+            # major region. If the call errors or returns implausible output
+            # we fall through to the heuristic (Hough + keyword) path.
+            try:
+                vlm_layout = self._build_layout_via_vlm(ctx)
+            except VLMError as exc:
+                logger.warning(
+                    "page_categorize: VLM-first failed (%s); using heuristic", exc
+                )
+                vlm_layout = None
+
+            if vlm_layout is not None:
+                logger.info("page_categorize: using VLM-first layout")
+                ctx.layout = vlm_layout
+                return ctx
+
+            logger.info("page_categorize: falling back to heuristic")
+            ctx.layout = self._build_layout_via_heuristic(ctx)
         except Exception as exc:  # noqa: BLE001 — degradation by design (§7)
             logger.exception("page_categorize failed")
             ctx.layout = None
             ctx.errors.append(f"page_categorize: {exc}")
         return ctx
 
-    # ── Top-level layout build ───────────────────────────────────────────────
+    # ── VLM-first layout build (primary path) ───────────────────────────────
 
-    def _build_layout(self, ctx: PipelineContext) -> PageLayout:
+    def _build_layout_via_vlm(self, ctx: PipelineContext) -> PageLayout | None:
+        """Single whole-page VLM call → PageLayout, or None on no-go.
+
+        Returns None (rather than raising) when the model legitimately
+        couldn't see a plan view or the bboxes failed the plausibility
+        guard. ``VLMError`` is allowed to bubble — the caller treats it the
+        same as None but logs at warning level.
+        """
+        assert ctx.source is not None, "ingest must run before page_categorize"
+
+        tool = self._vlm.detect_page_regions(ctx.source.raster_probe)
+
+        if tool.plan_view is None:
+            logger.info(
+                "page_categorize: VLM returned no plan_view; falling back"
+            )
+            return None
+
+        if not _is_vlm_layout_plausible(tool):
+            logger.info(
+                "page_categorize: VLM layout failed plausibility guard; falling back"
+            )
+            return None
+
+        page_w, page_h = _page_dimensions(ctx.source)
+        plan_view = _scale_normalized_to_source(
+            tool.plan_view, page_w, page_h
+        )
+        legend = (
+            _scale_normalized_to_source(tool.legend, page_w, page_h)
+            if tool.legend is not None
+            else None
+        )
+        schedule = (
+            _scale_normalized_to_source(tool.schedule, page_w, page_h)
+            if tool.schedule is not None
+            else None
+        )
+        title_block = (
+            _scale_normalized_to_source(tool.title_block, page_w, page_h)
+            if tool.title_block is not None
+            else None
+        )
+        notes = [
+            _scale_normalized_to_source(n, page_w, page_h) for n in tool.notes
+        ]
+        return PageLayout(
+            plan_view=plan_view,
+            legend=legend,
+            schedule=schedule,
+            title_block=title_block,
+            notes=notes,
+        )
+
+    # ── Heuristic layout build (fallback) ───────────────────────────────────
+
+    def _build_layout_via_heuristic(self, ctx: PipelineContext) -> PageLayout:
         assert ctx.source is not None, "ingest must run before page_categorize"
 
         whole_page_rect = _whole_page_rect(ctx.source)
@@ -292,6 +378,61 @@ class PageCategorizerStage(PipelineStage):
             logger.warning("categorize_region failed for rect %s: %s", rect_pt, exc)
             return "unknown"
         return result.region_kind
+
+
+# ── VLM-first plausibility + scaling helpers ─────────────────────────────────
+
+
+def _normalized_bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    """Area of an [x0, y0, x1, y1] bbox in normalized [0, 1] coords."""
+    x0, y0, x1, y1 = bbox
+    return max(x1 - x0, 0.0) * max(y1 - y0, 0.0)
+
+
+def _is_vlm_layout_plausible(tool: object) -> bool:
+    """Soft sanity check on a ``PageRegionsTool`` — see SOLUTION-DESIGN-V2 §5.3.
+
+    Reject layouts whose plan_view is missing, sub-1% / super-99% in area,
+    or essentially the whole page (within 5% slop on every edge). Any of
+    those signals "the model didn't actually localise a plan view" and
+    we should fall back to the heuristic. Other regions (legend, schedule,
+    notes, title_block) are filtered individually rather than failing the
+    whole layout — they're optional.
+    """
+    plan_view = getattr(tool, "plan_view", None)
+    if plan_view is None:
+        return False
+    area = _normalized_bbox_area(plan_view)
+    if area < _VLM_REGION_MIN_AREA or area > _VLM_REGION_MAX_AREA:
+        return False
+    x0, y0, x1, y1 = plan_view
+    tol = _VLM_PLAN_VIEW_PAGE_BOUNDS_TOL
+    if x0 <= tol and y0 <= tol and x1 >= 1.0 - tol and y1 >= 1.0 - tol:
+        # Plan view is essentially the page — degenerate, fall back.
+        return False
+    return True
+
+
+def _page_dimensions(source: DrawingSource) -> tuple[float, float]:
+    """Page width/height in source coordinate space (points or pixels).
+
+    Mirrors ``_whole_page_rect``: PDF points for vector_pdf, raster_probe
+    pixel size for raster sources.
+    """
+    if source.kind == "vector_pdf" and source.page_size_pt is not None:
+        return float(source.page_size_pt[0]), float(source.page_size_pt[1])
+    w, h = source.raster_probe.size
+    return float(w), float(h)
+
+
+def _scale_normalized_to_source(
+    bbox: tuple[float, float, float, float],
+    page_w: float,
+    page_h: float,
+) -> RectPt:
+    """Scale a normalized [0, 1] bbox to the source's coord space."""
+    x0, y0, x1, y1 = bbox
+    return (x0 * page_w, y0 * page_h, x1 * page_w, y1 * page_h)
 
 
 # ── Geometry helpers (pixel ↔ source coords) ─────────────────────────────────

@@ -64,6 +64,28 @@ class CategorizePageTool(BaseModel):
     ]
 
 
+class PageRegionsTool(BaseModel):
+    """Page Categorizer VLM-first wire format (SOLUTION-DESIGN-V2 §5.3).
+
+    A single whole-page VLM call returns rough bboxes for the major regions
+    on the sheet. Coords are normalized [0, 1] floats (x0, y0, x1, y1) in
+    the page's own coord space (post-rotation, pre-tile). The categorizer
+    scales them to ``RectPt`` before populating ``PageLayout``.
+
+    All fields are optional except ``notes`` (defaults to []) — the model
+    may not see every region on every drawing, and a missing region is more
+    informative than a hallucinated one. Per-region positional accuracy of
+    5-10% is tolerable; downstream stages (tiled detect) re-tile around the
+    plan-view rect and don't need pixel-perfect inputs.
+    """
+
+    plan_view: tuple[float, float, float, float] | None = None
+    legend: tuple[float, float, float, float] | None = None
+    schedule: tuple[float, float, float, float] | None = None
+    title_block: tuple[float, float, float, float] | None = None
+    notes: list[tuple[float, float, float, float]] = Field(default_factory=list)
+
+
 class ReviewSegmentTool(BaseModel):
     """Reviewer wire format (SOLUTION-DESIGN-V2 §5.6, §6.3).
 
