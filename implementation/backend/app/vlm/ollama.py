@@ -32,10 +32,13 @@ from app.vlm.tools import (
     DetectDuctsTool,
     DetectionResult,
     LegendRegionTool,
+    NotesRegionTool,
     PageRegionsTool,
     PlanViewTool,
     RefineSegmentTool,
     ReviewSegmentTool,
+    ScheduleTool,
+    TitleBlockTool,
     VLMSegment,
 )
 
@@ -332,6 +335,142 @@ class OllamaVisionClient(VLMClient):
         logger.info(
             "vlm.detect_legend: done bboxes=%d elapsed=%.2fs",
             len(tool.bboxes),
+            time.monotonic() - t0,
+        )
+        return tool
+
+    def detect_title_block(self, image: Image) -> TitleBlockTool:
+        """Focused title-block detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same posture as ``detect_plan_view``: single-question prompt,
+        JSON-mode + Pydantic-validate, schema failures surface as
+        VLMError. Used by the auxiliary-first VLM-first path (third
+        revision of §5.3) — plan_view is derived from the page rect
+        minus the auxiliaries, so this call's job is just to localise
+        the title banner / metadata box.
+        """
+        prompt = _load_model_specific_prompt("detect_title_block.txt", self._model)
+
+        downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(downscaled)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_title_block: start image=%dx%d",
+            downscaled.width,
+            downscaled.height,
+        )
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM detect_title_block")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM title_block JSON invalid: {exc}") from exc
+        try:
+            tool = TitleBlockTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM title_block JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+        logger.info(
+            "vlm.detect_title_block: done bbox=%s elapsed=%.2fs",
+            tool.bbox,
+            time.monotonic() - t0,
+        )
+        return tool
+
+    def detect_notes(self, image: Image) -> NotesRegionTool:
+        """Focused notes-region detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same posture as ``detect_legend`` — multi-bbox shape lets a
+        drawing return non-adjacent notes columns separately. Empty
+        list is "no notes on this drawing" and is non-failure.
+        """
+        prompt = _load_model_specific_prompt("detect_notes.txt", self._model)
+
+        downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(downscaled)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_notes: start image=%dx%d",
+            downscaled.width,
+            downscaled.height,
+        )
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM detect_notes")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM notes JSON invalid: {exc}") from exc
+        try:
+            tool = NotesRegionTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM notes JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+        logger.info(
+            "vlm.detect_notes: done bboxes=%d elapsed=%.2fs",
+            len(tool.bboxes),
+            time.monotonic() - t0,
+        )
+        return tool
+
+    def detect_schedule(self, image: Image) -> ScheduleTool:
+        """Focused schedule-region detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same posture as ``detect_plan_view``: single-bbox payload,
+        JSON-mode + Pydantic-validate, schema failures surface as
+        VLMError. ``None`` is the legitimate "no schedule visible"
+        answer.
+        """
+        prompt = _load_model_specific_prompt("detect_schedule.txt", self._model)
+
+        downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
+        payload = {
+            "model": self._model,
+            "prompt": prompt,
+            "images": [_encode_png_b64(downscaled)],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        t0 = time.monotonic()
+        logger.info(
+            "vlm.detect_schedule: start image=%dx%d",
+            downscaled.width,
+            downscaled.height,
+        )
+        raw = self._post("/api/generate", payload).get("response", "")
+        if not raw:
+            raise VLMError("empty response from VLM detect_schedule")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VLMError(f"VLM schedule JSON invalid: {exc}") from exc
+        try:
+            tool = ScheduleTool.model_validate(data)
+        except ValidationError as exc:
+            raise VLMError(
+                f"VLM schedule JSON failed schema: {exc.error_count()} errors"
+            ) from exc
+        logger.info(
+            "vlm.detect_schedule: done bbox=%s elapsed=%.2fs",
+            tool.bbox,
             time.monotonic() - t0,
         )
         return tool

@@ -18,9 +18,12 @@ if TYPE_CHECKING:
         CategorizePageTool,
         DetectionResult,
         LegendRegionTool,
+        NotesRegionTool,
         PageRegionsTool,
         PlanViewTool,
         RefineSegmentTool,
+        ScheduleTool,
+        TitleBlockTool,
     )
 
 
@@ -69,6 +72,41 @@ class VLMClient(Protocol):
         multi-bbox shape is preserved here. An empty list means "no
         legend on this drawing"; the calling stage treats that as a
         non-failure (``layout.legend = None``).
+        """
+        ...
+
+    def detect_title_block(self, image: Image) -> TitleBlockTool:
+        """Focused VLM call for title-block detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same input shape as ``detect_plan_view``. Returns one normalized
+        [0, 1] bbox covering the title banner + sheet-metadata box (when
+        present together) or ``None`` when no title block is visible. The
+        categorizer's auxiliary-first VLM-first path uses this region to
+        clip plan_view's nearest page edge; a missing title block leaves
+        that edge un-clipped.
+        """
+        ...
+
+    def detect_notes(self, image: Image) -> NotesRegionTool:
+        """Focused VLM call for notes-region detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same input shape as ``detect_plan_view``. Returns zero or more
+        normalized [0, 1] bboxes — drawings sometimes carry notes in
+        multiple non-adjacent columns. Empty list means "no notes on
+        this drawing", which is non-failure. The categorizer treats
+        each notes bbox as an independent auxiliary region for plan_view
+        derivation.
+        """
+        ...
+
+    def detect_schedule(self, image: Image) -> ScheduleTool:
+        """Focused VLM call for schedule-region detection (SOLUTION-DESIGN-V2 §5.3).
+
+        Same input shape as ``detect_plan_view``. Returns one normalized
+        [0, 1] bbox covering the equipment / fixture specification table,
+        or ``None`` when no schedule is present. Single-bbox shape is
+        sufficient because schedules don't split across the page the way
+        legends do.
         """
         ...
 

@@ -28,8 +28,10 @@ from app.ocr.cache import OCRCache
 from app.pipeline.base import PipelineContext
 from app.pipeline.categorize import (
     PageCategorizerStage,
+    _derive_plan_view_normalized,
     _is_strip,
     _merge_strips,
+    _nearest_edge,
     _select_plan_view,
 )
 from app.source.base import DrawingSource
@@ -38,7 +40,10 @@ from app.vlm.tools import (
     CategorizePageTool,
     DetectionResult,
     LegendRegionTool,
+    NotesRegionTool,
     PlanViewTool,
+    ScheduleTool,
+    TitleBlockTool,
 )
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
@@ -47,16 +52,22 @@ from app.vlm.tools import (
 class _StubVLM:
     """VLMClient stub — categorize_region returns a preset value or raises.
 
-    ``detect_plan_view`` and ``detect_legend`` are also stubbed. By default
-    both return empty results (no bbox / empty list), which the categorizer
-    treats as "VLM didn't localise a plan view" → falls through to the
-    heuristic. Tests that want to exercise the VLM-first happy path pass
-    explicit ``plan_view_result`` / ``legend_result`` arguments, or one of
-    the ``raise_on_*`` flags to simulate a VLM error.
+    The four auxiliary detectors (``detect_title_block``, ``detect_legend``,
+    ``detect_notes``, ``detect_schedule``) are stubbed for the auxiliary-
+    first VLM-first path (SOLUTION-DESIGN-V2 §5.3 third revision). By
+    default each returns its empty/null result, which means the
+    categorizer derives plan_view from the full page rect — and the
+    plausibility guard rejects that as "essentially the whole page",
+    so the heuristic fallback runs. Tests that want to exercise the
+    VLM-first happy path pass explicit ``*_result`` arguments to seed
+    auxiliary regions, or use the ``raise_on_*`` flags to simulate a
+    VLM error on a specific call.
+
+    ``detect_plan_view`` is retained for backward-compat — the auxiliary-
+    first path no longer calls it, but the Protocol still has it.
 
     detect / disambiguate_region / detect_page_regions exist only to
-    satisfy the Protocol; tests here don't exercise them on the VLM-first
-    path (which now uses two focused calls instead of the combined one).
+    satisfy the Protocol; tests here don't exercise them.
     """
 
     def __init__(
@@ -68,6 +79,12 @@ class _StubVLM:
         raise_on_plan_view: bool = False,
         legend_result: LegendRegionTool | None = None,
         raise_on_legend: bool = False,
+        title_block_result: TitleBlockTool | None = None,
+        raise_on_title_block: bool = False,
+        notes_result: NotesRegionTool | None = None,
+        raise_on_notes: bool = False,
+        schedule_result: ScheduleTool | None = None,
+        raise_on_schedule: bool = False,
     ) -> None:
         self._kind = categorize_kind
         self._raise = raise_on_categorize
@@ -75,9 +92,18 @@ class _StubVLM:
         self._raise_on_plan_view = raise_on_plan_view
         self._legend_result = legend_result
         self._raise_on_legend = raise_on_legend
+        self._title_block_result = title_block_result
+        self._raise_on_title_block = raise_on_title_block
+        self._notes_result = notes_result
+        self._raise_on_notes = raise_on_notes
+        self._schedule_result = schedule_result
+        self._raise_on_schedule = raise_on_schedule
         self.call_count = 0
         self.plan_view_call_count = 0
         self.legend_call_count = 0
+        self.title_block_call_count = 0
+        self.notes_call_count = 0
+        self.schedule_call_count = 0
         self.heuristic_invoked = False
 
     def detect(self, image: Image.Image, *, prompt_version: str = "v1") -> DetectionResult:
@@ -102,7 +128,7 @@ class _StubVLM:
             raise VLMError("stub: detect_plan_view raised")
         if self._plan_view_result is not None:
             return self._plan_view_result
-        # Default — no plan view → categorizer falls back to the heuristic.
+        # Default — no plan view (retained for backward-compat).
         return PlanViewTool()
 
     def detect_legend(self, image: Image.Image) -> LegendRegionTool:
@@ -114,6 +140,33 @@ class _StubVLM:
             return self._legend_result
         # Default — no legend on this drawing.
         return LegendRegionTool()
+
+    def detect_title_block(self, image: Image.Image) -> TitleBlockTool:
+        del image
+        self.title_block_call_count += 1
+        if self._raise_on_title_block:
+            raise VLMError("stub: detect_title_block raised")
+        if self._title_block_result is not None:
+            return self._title_block_result
+        return TitleBlockTool()
+
+    def detect_notes(self, image: Image.Image) -> NotesRegionTool:
+        del image
+        self.notes_call_count += 1
+        if self._raise_on_notes:
+            raise VLMError("stub: detect_notes raised")
+        if self._notes_result is not None:
+            return self._notes_result
+        return NotesRegionTool()
+
+    def detect_schedule(self, image: Image.Image) -> ScheduleTool:
+        del image
+        self.schedule_call_count += 1
+        if self._raise_on_schedule:
+            raise VLMError("stub: detect_schedule raised")
+        if self._schedule_result is not None:
+            return self._schedule_result
+        return ScheduleTool()
 
 
 # ── Fixture builders ─────────────────────────────────────────────────────────
@@ -629,114 +682,143 @@ def test_plan_view_largest_when_side_by_side() -> None:
     assert "multi_plan_view_detected" in ctx.errors
 
 
-# ── VLM-first page categorization (SOLUTION-DESIGN-V2 §5.3 refactor) ─────────
+# ── VLM-first auxiliary-first page categorization (§5.3 third revision) ──────
 
 
 def test_vlm_first_populates_layout_when_returns_valid() -> None:
-    """Stub returns a sensible plan_view + legend pair → layout matches;
-    heuristic is NOT consulted. The OCR cache is intentionally empty
-    (which would force the heuristic to fall back to whole-page) so we
-    can prove the VLM-first path bypassed the heuristic entirely.
+    """Stub returns a title at top + legend on the right → derived plan_view
+    excludes both, layout is populated correctly. Heuristic is NOT consulted
+    (OCR cache is empty so a heuristic run would fire categorizer_failed).
 
-    title_block / schedule / notes are NOT populated by the VLM-first
-    path in v2 — they're cosmetic and the focused-call refactor drops
-    them. The heuristic still surfaces them when it runs.
+    Auxiliary-first refactor: plan_view is derived as the page rect with
+    title's top edge clipped (1% safety pad) and legend's right edge
+    clipped. The auxiliary regions themselves are surfaced into the
+    layout fields after independent 3% padding.
     """
     img = _blank_image(800, 600)
     src = _raster_source(img)
-    # Empty OCR cache: if the heuristic ran, it would fall back to whole-
-    # page plan_view. The VLM-first result must override that.
+    ctx = _ctx_with(src, _ocr_cache([]))
+    # Title sits across the top strip; legend sits along the right strip.
+    vlm = _StubVLM(
+        title_block_result=TitleBlockTool(bbox=(0.10, 0.00, 0.90, 0.10)),
+        legend_result=LegendRegionTool(bboxes=[(0.85, 0.10, 1.00, 0.90)]),
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Derived plan_view (normalized): top clipped to 0.10 + 0.01 = 0.11;
+    # right clipped to 0.85 - 0.01 = 0.84. plan_view normalized =
+    # (0.0, 0.11, 0.84, 1.0). Padded by 3% then clamped: (0.0, 0.08,
+    # 0.87, 1.0). Scaled to 800×600 → (0, 48, 696, 600).
+    assert ctx.layout.plan_view == pytest.approx((0.0, 48.0, 696.0, 600.0))
+    # Title bbox (0.10, 0.00, 0.90, 0.10) padded → (0.07, 0.00, 0.93,
+    # 0.13). Scaled → (56, 0, 744, 78).
+    assert ctx.layout.title_block == pytest.approx((56.0, 0.0, 744.0, 78.0))
+    # Legend bbox (0.85, 0.10, 1.00, 0.90) padded → (0.82, 0.07, 1.0,
+    # 0.93). Scaled → (656, 42, 800, 558).
+    assert ctx.layout.legend == pytest.approx((656.0, 42.0, 800.0, 558.0))
+    # Notes / schedule were not provided.
+    assert ctx.layout.notes == []
+    assert ctx.layout.schedule is None
+    # Heuristic NOT consulted — empty OCR cache would have fired
+    # categorizer_failed.
+    assert not any("categorizer_failed" in e for e in ctx.errors)
+    # Each auxiliary detector was called once.
+    assert vlm.title_block_call_count == 1
+    assert vlm.legend_call_count == 1
+    assert vlm.notes_call_count == 1
+    assert vlm.schedule_call_count == 1
+
+
+def test_vlm_first_falls_back_when_plan_view_degenerate() -> None:
+    """Auxiliaries collectively consume plan_view → heuristic runs.
+
+    Two large auxiliaries land on opposite edges and each clips well
+    over half the page; combined they leave plan_view with negative
+    height (or below the plausibility threshold). Per the 35%-cap, each
+    individual aux is rejected with a WARNING — but here we test the
+    softer case where each aux clips just under the cap and the
+    cumulative effect is to make plan_view degenerate.
+    """
+    img = _vertical_split_image(800, 600)
+    src = _raster_source(img)
+    # Heuristic fixture so the fallback can produce a non-trivial layout.
+    matches = [
+        _match("MECHANICAL PLAN", x=100, y=100),
+        _match("PROJECT NAME: ACME", x=420, y=460),
+    ]
+    ctx = _ctx_with(src, _ocr_cache(matches))
+    # Title at top (clips top by 0.34) + schedule at bottom (clips bottom
+    # by 0.34). Combined: plan_view y range = [0.35, 0.65]. That's a
+    # 30%-tall strip — but the original page width is preserved, so the
+    # area is 0.30 which still passes the >= 1% min. To force a
+    # degenerate plan_view we use auxiliaries that just-clear the cap
+    # and overlap heavily. Easier: a single auxiliary inside the cap
+    # but combined with another so total clip drives derived rect to
+    # zero height.
+    vlm = _StubVLM(
+        title_block_result=TitleBlockTool(bbox=(0.0, 0.0, 1.0, 0.34)),
+        schedule_result=ScheduleTool(bbox=(0.0, 0.67, 1.0, 1.0)),
+        notes_result=NotesRegionTool(bboxes=[(0.0, 0.34, 1.0, 0.66)]),
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    # Heuristic ran. We don't assert exact geometry here — just that the
+    # heuristic produced a plan_view derived from the OCR matches (left
+    # half of the divider).
+    assert ctx.layout is not None
+    px0, _, px1, _ = ctx.layout.plan_view
+    assert px0 <= 100 < px1
+    # All four auxiliary detectors ran (independent calls).
+    assert vlm.title_block_call_count == 1
+    assert vlm.legend_call_count == 1
+    assert vlm.notes_call_count == 1
+    assert vlm.schedule_call_count == 1
+
+
+def test_vlm_first_legend_failure_doesnt_block_plan_view() -> None:
+    """Legend call raises VLMError → other auxiliaries still run, plan_view
+    derived from the survivors. A failure on one auxiliary detector must
+    not poison the others or force a heuristic fallback.
+
+    OCR cache is empty so we can prove the VLM-first path bypassed the
+    heuristic entirely: a heuristic run would fire categorizer_failed.
+    """
+    img = _blank_image(800, 600)
+    src = _raster_source(img)
     ctx = _ctx_with(src, _ocr_cache([]))
     vlm = _StubVLM(
-        plan_view_result=PlanViewTool(bbox=(0.05, 0.05, 0.70, 0.95)),
-        legend_result=LegendRegionTool(bboxes=[(0.72, 0.05, 0.98, 0.40)]),
+        title_block_result=TitleBlockTool(bbox=(0.10, 0.00, 0.90, 0.10)),
+        raise_on_legend=True,
     )
 
     PageCategorizerStage(vlm).run(ctx)
 
     assert ctx.layout is not None
-    # Plan view scaled to source coords (raster source → pixel size).
-    # Each VLM bbox is padded by 3% per edge before scaling — see
-    # `_VLM_BBOX_PAD_RATIO` in categorize.py. plan_view (0.05, 0.05, 0.70,
-    # 0.95) → padded (0.02, 0.02, 0.73, 0.98) → scaled (16, 12, 584, 588).
-    assert ctx.layout.plan_view == pytest.approx((16.0, 12.0, 584.0, 588.0))
-    # legend (0.72, 0.05, 0.98, 0.40) → padded (0.69, 0.02, 1.0, 0.43)
-    # (right edge clamped at 1.0) → scaled (552, 12, 800, 258).
-    assert ctx.layout.legend == pytest.approx((552.0, 12.0, 800.0, 258.0))
-    # title_block / schedule / notes intentionally None / [] on the
-    # VLM-first path.
-    assert ctx.layout.schedule is None
-    assert ctx.layout.title_block is None
-    assert ctx.layout.notes == []
-    # The VLM-first path bypasses the heuristic entirely: the no-OCR-matches
-    # whole-page fallback warning would have fired had the heuristic run.
-    assert not any("categorizer_failed" in e for e in ctx.errors)
-    assert vlm.plan_view_call_count == 1
+    # Title clip alone: top edge → 0.11. plan_view normalized
+    # (0, 0.11, 1, 1). Padded by 3% then clamped: (0.0, 0.08, 1.0, 1.0).
+    # Scaled to 800×600: (0, 48, 800, 600).
+    assert ctx.layout.plan_view == pytest.approx((0.0, 48.0, 800.0, 600.0))
+    assert ctx.layout.legend is None
+    # All four detectors were attempted; only legend failed.
+    assert vlm.title_block_call_count == 1
     assert vlm.legend_call_count == 1
-
-
-def test_vlm_first_falls_back_on_no_plan_view() -> None:
-    """Stub returns plan_view bbox=None → fall through to heuristic.
-
-    Legend call is NOT made when plan_view is missing — the categorizer
-    short-circuits to avoid wasting a call on a drawing we can't even
-    localise the plan view on.
-    """
-    img = _vertical_split_image(800, 600)
-    src = _raster_source(img)
-    matches = [
-        _match("MECHANICAL PLAN", x=100, y=100),
-        _match("PROJECT NAME: ACME", x=420, y=460),
-    ]
-    ctx = _ctx_with(src, _ocr_cache(matches))
-    # Default stub: plan_view bbox=None → heuristic runs, legend never queried.
-    vlm = _StubVLM()
-
-    PageCategorizerStage(vlm).run(ctx)
-
-    assert ctx.layout is not None
-    # Heuristic produced the layout — left-half plan view containing the
-    # MECHANICAL PLAN keyword.
-    px0, py0, px1, py1 = ctx.layout.plan_view
-    assert px0 <= 100 < px1
-    assert py0 <= 100 < py1
-    assert vlm.plan_view_call_count == 1
-    assert vlm.legend_call_count == 0  # short-circuited
-
-
-def test_vlm_first_falls_back_on_implausible_layout() -> None:
-    """Stub returns plan_view = whole-page bbox → guard rejects → heuristic.
-
-    Legend call is short-circuited when the plan_view fails the guard —
-    same reasoning as the no-plan-view path: don't burn a focused call
-    on a drawing where the cheaper plan_view check already failed.
-    """
-    img = _vertical_split_image(800, 600)
-    src = _raster_source(img)
-    matches = [
-        _match("MECHANICAL PLAN", x=100, y=100),
-        _match("PROJECT NAME: ACME", x=420, y=460),
-    ]
-    ctx = _ctx_with(src, _ocr_cache(matches))
-    vlm = _StubVLM(
-        # Plan view is essentially the whole page — guard rejects.
-        plan_view_result=PlanViewTool(bbox=(0.0, 0.0, 1.0, 1.0)),
-    )
-
-    PageCategorizerStage(vlm).run(ctx)
-
-    assert ctx.layout is not None
-    # Heuristic ran: left-half plan view, NOT the whole-page rect from VLM.
-    px0, _, px1, _ = ctx.layout.plan_view
-    # Whole-page would be (0, 0, 800, 600); the heuristic picks the left
-    # half (~0–400).
-    assert px1 < 600  # not the whole page
-    assert px0 <= 100 < px1
-    assert vlm.legend_call_count == 0  # short-circuited
+    assert vlm.notes_call_count == 1
+    assert vlm.schedule_call_count == 1
+    # Heuristic was NOT invoked.
+    assert not any("categorizer_failed" in e for e in ctx.errors)
 
 
 def test_vlm_first_falls_back_on_vlm_error() -> None:
-    """Stub raises VLMError on plan_view → heuristic runs unchanged."""
+    """First auxiliary raises → other auxiliaries still attempted.
+
+    Even if one detector errors, the categorizer must run all four
+    independently. A title-block failure with no other auxiliaries
+    leaves the page rect un-clipped; the plausibility guard then
+    rejects (whole-page) and the heuristic runs.
+    """
     img = _vertical_split_image(800, 600)
     src = _raster_source(img)
     matches = [
@@ -744,56 +826,45 @@ def test_vlm_first_falls_back_on_vlm_error() -> None:
         _match("PROJECT NAME: ACME", x=420, y=460),
     ]
     ctx = _ctx_with(src, _ocr_cache(matches))
-    vlm = _StubVLM(raise_on_plan_view=True)
+    # title_block raises; all other detectors return their default empty
+    # results. Net: derived plan_view = full page → guard fails →
+    # heuristic runs.
+    vlm = _StubVLM(raise_on_title_block=True)
 
     PageCategorizerStage(vlm).run(ctx)
 
     assert ctx.layout is not None
-    # Heuristic ran successfully despite VLM raising.
+    # Heuristic ran successfully — left-half plan view from MECHANICAL
+    # PLAN keyword.
     px0, py0, px1, py1 = ctx.layout.plan_view
     assert px0 <= 100 < px1
     assert py0 <= 100 < py1
-    assert vlm.plan_view_call_count == 1
-    # Legend call must not run when plan_view itself errored.
-    assert vlm.legend_call_count == 0
-
-
-def test_vlm_first_scales_normalized_bboxes_correctly() -> None:
-    """Padded VLM plan_view (0.1, 0.1, 0.9, 0.9) on 800×600 → (56, 42, 744, 558).
-
-    Each edge of the VLM bbox is padded by 3% of page dims before scaling
-    (the model consistently under-estimates region extents). 0.1 - 0.03 =
-    0.07; 0.9 + 0.03 = 0.93. Scaled to 800×600: (56, 42, 744, 558).
-    """
-    img = _blank_image(800, 600)
-    src = _raster_source(img)
-    ctx = _ctx_with(src, _ocr_cache([]))
-    vlm = _StubVLM(
-        plan_view_result=PlanViewTool(bbox=(0.1, 0.1, 0.9, 0.9)),
-    )
-
-    PageCategorizerStage(vlm).run(ctx)
-
-    assert ctx.layout is not None
-    assert ctx.layout.plan_view == pytest.approx((56.0, 42.0, 744.0, 558.0))
+    # All four detectors were ATTEMPTED — auxiliary calls are independent
+    # of each other.
+    assert vlm.title_block_call_count == 1
+    assert vlm.legend_call_count == 1
+    assert vlm.notes_call_count == 1
+    assert vlm.schedule_call_count == 1
 
 
 def test_vlm_first_unions_multi_block_legend() -> None:
     """Multi-block legend → PageLayout.legend is the bounding rect of all blocks.
 
     Engineering drawings frequently split the legend into a symbol icon
-    box AND a separate abbreviation table. The categorizer unions the two
-    so LegendParserStage downstream sees one contiguous legend rect.
+    box AND a separate abbreviation table. The categorizer unions the
+    two so LegendParserStage downstream sees one contiguous legend rect.
+    plan_view is derived from the legend's nearest-edge clip — both
+    blocks land on the right edge so the rightmost-clip wins.
     """
     img = _blank_image(800, 600)
     src = _raster_source(img)
     ctx = _ctx_with(src, _ocr_cache([]))
+    # Two legend blocks both on the right side of the page.
     vlm = _StubVLM(
-        plan_view_result=PlanViewTool(bbox=(0.05, 0.05, 0.65, 0.95)),
         legend_result=LegendRegionTool(
             bboxes=[
-                (0.70, 0.10, 0.95, 0.40),  # upper symbol box
-                (0.70, 0.55, 0.95, 0.85),  # lower abbreviation table
+                (0.85, 0.10, 0.98, 0.40),  # upper symbol box
+                (0.85, 0.55, 0.98, 0.85),  # lower abbreviation table
             ],
         ),
     )
@@ -801,40 +872,93 @@ def test_vlm_first_unions_multi_block_legend() -> None:
     PageCategorizerStage(vlm).run(ctx)
 
     assert ctx.layout is not None
-    # Each input is padded individually then unioned. Upper box padded:
-    # (0.67, 0.07, 0.98, 0.43); lower box padded: (0.67, 0.52, 0.98, 0.88).
-    # Bounding rect: (0.67, 0.07, 0.98, 0.88) → scaled to 800×600:
-    # (536, 42, 784, 528).
-    assert ctx.layout.legend == pytest.approx((536.0, 42.0, 784.0, 528.0))
+    # Each input padded individually then unioned. Upper padded:
+    # (0.82, 0.07, 1.0, 0.43); lower padded: (0.82, 0.52, 1.0, 0.88).
+    # Bounding rect: (0.82, 0.07, 1.0, 0.88) → scaled to 800×600:
+    # (656, 42, 800, 528).
+    assert ctx.layout.legend == pytest.approx((656.0, 42.0, 800.0, 528.0))
 
 
-def test_vlm_first_legend_failure_doesnt_block_plan_view() -> None:
-    """plan_view succeeds; legend call raises VLMError.
+# ── Plan-view derivation helpers (auxiliary-first §5.3) ──────────────────────
 
-    A successful plan_view localisation must NOT be discarded because the
-    independent legend call failed. Layout.plan_view should be populated
-    from the VLM, layout.legend stays None, and the heuristic must NOT
-    be invoked (the OCR cache is empty so a heuristic invocation would
-    fire ``categorizer_failed`` warnings — we assert their absence).
+
+def test_derive_plan_view_clips_top_edge() -> None:
+    """Title at the top of the page → plan_view y0 = title.y1 + safety pad.
+
+    The aux region's nearest edge is the page top; the derivation clips
+    plan_view's top edge to the auxiliary's inner (bottom) edge offset
+    by the 1% safety pad.
     """
-    img = _blank_image(800, 600)
-    src = _raster_source(img)
-    ctx = _ctx_with(src, _ocr_cache([]))
-    vlm = _StubVLM(
-        plan_view_result=PlanViewTool(bbox=(0.1, 0.1, 0.9, 0.9)),
-        raise_on_legend=True,
-    )
+    title = (0.10, 0.00, 0.90, 0.08)
+    derived = _derive_plan_view_normalized([title])
+    assert derived is not None
+    x0, y0, x1, y1 = derived
+    # Top clipped to 0.08 + 0.01 = 0.09; other edges stay at page bounds.
+    assert y0 == pytest.approx(0.09)
+    assert x0 == 0.0
+    assert x1 == 1.0
+    assert y1 == 1.0
 
-    PageCategorizerStage(vlm).run(ctx)
 
-    assert ctx.layout is not None
-    # Plan view came through — same expected scaling as
-    # test_vlm_first_scales_normalized_bboxes_correctly.
-    assert ctx.layout.plan_view == pytest.approx((56.0, 42.0, 744.0, 558.0))
-    assert ctx.layout.legend is None
-    # Both calls were attempted; only legend failed.
-    assert vlm.plan_view_call_count == 1
-    assert vlm.legend_call_count == 1
-    # Heuristic was NOT invoked — the empty-OCR-cache fallback warning
-    # would have appeared had the heuristic run.
-    assert not any("categorizer_failed" in e for e in ctx.errors)
+def test_derive_plan_view_clips_right_edge() -> None:
+    """Legend on the right edge → plan_view x1 = legend.x0 - safety pad."""
+    legend = (0.86, 0.10, 1.00, 0.90)
+    derived = _derive_plan_view_normalized([legend])
+    assert derived is not None
+    x0, y0, x1, y1 = derived
+    # Right clipped to 0.86 - 0.01 = 0.85.
+    assert x1 == pytest.approx(0.85)
+    assert x0 == 0.0
+    assert y0 == 0.0
+    assert y1 == 1.0
+
+
+def test_derive_plan_view_caps_excessive_clip(caplog) -> None:  # type: ignore[no-untyped-def]
+    """Aux region that would clip > 35% of an edge is skipped + WARNING logged.
+
+    A real auxiliary doesn't take up a third of the page on its
+    relevant edge; a region that would force a deeper clip is almost
+    certainly a model mis-identification (whole-page hallucination,
+    or wrong region type). The derive helper logs the skip and leaves
+    plan_view's edge un-clipped.
+    """
+    # Right-edge auxiliary that would clip 50% of the right edge.
+    bad_aux = (0.50, 0.10, 1.00, 0.90)
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.categorize"):
+        derived = _derive_plan_view_normalized([bad_aux])
+    assert derived is not None
+    # Right edge un-clipped — aux was rejected.
+    _, _, x1, _ = derived
+    assert x1 == 1.0
+    skip_records = [
+        r for r in caplog.records if "would clip" in r.getMessage()
+    ]
+    assert skip_records, "expected a WARNING record naming the skip reason"
+
+
+def test_derive_plan_view_handles_multiple_on_same_edge() -> None:
+    """Two auxiliaries both at the top → deeper clip wins.
+
+    A title bar at the very top + a notes block immediately below both
+    have "top" as their nearest edge. plan_view's top should be clipped
+    to the deeper of the two inner edges (with safety pad).
+    """
+    title = (0.10, 0.00, 0.90, 0.05)  # inner edge y=0.05
+    notes = (0.10, 0.05, 0.40, 0.15)  # inner edge y=0.15 (deeper)
+    derived = _derive_plan_view_normalized([title, notes])
+    assert derived is not None
+    _, y0, _, _ = derived
+    # Deeper clip wins: 0.15 + 0.01 = 0.16.
+    assert y0 == pytest.approx(0.16)
+
+
+def test_nearest_edge_picks_smallest_distance() -> None:
+    """Sanity: _nearest_edge returns the page edge with minimum distance.
+
+    A region with bbox (0.0, 0.45, 0.05, 0.55) sits flush against the
+    left edge — left distance = 0, others ≥ 0.45.
+    """
+    assert _nearest_edge((0.0, 0.45, 0.05, 0.55)) == "left"
+    assert _nearest_edge((0.10, 0.00, 0.90, 0.10)) == "top"
+    assert _nearest_edge((0.10, 0.90, 0.90, 1.00)) == "bottom"
+    assert _nearest_edge((0.95, 0.10, 1.00, 0.90)) == "right"

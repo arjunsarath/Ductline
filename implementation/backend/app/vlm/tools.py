@@ -125,6 +125,66 @@ class LegendRegionTool(BaseModel):
     bboxes: list[tuple[float, float, float, float]] = Field(default_factory=list)
 
 
+class TitleBlockTool(BaseModel):
+    """Focused VLM wire format for title-block detection (SOLUTION-DESIGN-V2 §5.3).
+
+    Output of ``VLMClient.detect_title_block`` — one normalized [0, 1] bbox
+    in the page's coord space, or ``None`` when no title block is visible.
+    Same single-question, schema-only posture as ``PlanViewTool`` /
+    ``LegendRegionTool``: small VLMs (llama3.2-vision) handle a focused
+    "where is the title banner?" reliably, but degrade fast when the same
+    call is asked to disambiguate against legends/notes/plan_view.
+
+    A "title block" here covers both the banner-shaped header strip AND the
+    sheet-metadata box (project / drawn-by / date / scale). When both
+    appear on the page the model is asked to return ONE bbox covering
+    them together — the categorizer uses this to clip a single page edge,
+    so a unioned rect is sufficient. ``None`` is the legitimate "no title
+    block visible" answer, treated as non-failure.
+    """
+
+    bbox: tuple[float, float, float, float] | None = None
+
+
+class NotesRegionTool(BaseModel):
+    """Focused VLM wire format for notes-region detection (SOLUTION-DESIGN-V2 §5.3).
+
+    Output of ``VLMClient.detect_notes`` — zero or more normalized [0, 1]
+    bboxes in the page's coord space. Notes are paragraphs of written
+    instructions ("GENERAL NOTES", numbered text blocks, abbreviation
+    keys with prose definitions). The list shape lets a drawing return
+    multiple notes columns separately when they sit at non-adjacent
+    positions on the sheet; adjacent notes blocks should be returned as
+    a single bbox covering the column.
+
+    Empty list is the legitimate "no notes on this drawing" answer.
+    Notes are intentionally distinguished from legend (symbol/abbr table)
+    and schedule (equipment table) by prompt wording — the categorizer
+    treats each region's bboxes independently.
+    """
+
+    bboxes: list[tuple[float, float, float, float]] = Field(default_factory=list)
+
+
+class ScheduleTool(BaseModel):
+    """Focused VLM wire format for schedule-region detection (SOLUTION-DESIGN-V2 §5.3).
+
+    Output of ``VLMClient.detect_schedule`` — one normalized [0, 1] bbox
+    in the page's coord space, or ``None`` when no schedule is present.
+    A "schedule" is the equipment / fixture specification table:
+    multi-row tabular data with columns of duct sizes, equipment IDs,
+    CFM ratings, etc. Distinct from a legend (symbol key) and notes
+    (prose paragraphs) by being a dense grid of numbers and codes.
+
+    Same single-bbox posture as ``TitleBlockTool``: schedules don't
+    typically split across the page the way legends do, so a single rect
+    is sufficient. ``None`` is the legitimate "no schedule visible"
+    answer.
+    """
+
+    bbox: tuple[float, float, float, float] | None = None
+
+
 class ReviewSegmentTool(BaseModel):
     """Reviewer wire format (SOLUTION-DESIGN-V2 §5.6, §6.3).
 

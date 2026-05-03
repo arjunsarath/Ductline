@@ -2,14 +2,18 @@
 
 Decomposes the drawing into named regions (title block, schedule, legend,
 notes, plan view) so downstream tiled detect (§5.5) only runs on plan-view
-geometry. VLM-first: two focused single-region calls — ``detect_plan_view``
-first, then ``detect_legend`` — return rough region bboxes. Each prompt is
-30-50 tokens with a single question and schema, which is in llama3.2-vision's
-sweet spot. The Hough-line + keyword heuristic stays as a fallback, used
-only when the plan_view call errors or its output fails the soft plausibility
-guard. ``title_block``, ``schedule`` and ``notes`` are intentionally dropped
-from the VLM-first path (cosmetic in v2 — no downstream stage consumes them
-in a load-bearing way); the heuristic still populates them on best-effort.
+geometry. VLM-first: four sequential auxiliary-region calls — title_block,
+legend, notes, schedule — each return their own rough bboxes. plan_view is
+DERIVED, never asked: starting from the page rect we clip each auxiliary
+region's nearest page edge to its inner edge (with a 1% safety pad), capping
+any single-edge clip at 35% of the page dimension to reject mis-identified
+auxiliaries. Each focused prompt is 30-50 tokens with a single question and
+schema, which is in llama3.2-vision's sweet spot. The Hough-line + keyword
+heuristic stays as a fallback, used when the derived plan_view fails the
+soft plausibility guard or every auxiliary call errors. The heuristic still
+populates ``title_block`` / ``schedule`` / ``notes`` on best-effort when it
+runs; on the VLM-first path we surface the auxiliary regions we successfully
+identified into the layout fields.
 
 Locked decisions (SOLUTION-DESIGN-V2 §5.3, §7):
 
@@ -40,7 +44,8 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from typing import Literal, TypeVar
 
 import cv2
 import numpy as np
@@ -142,6 +147,30 @@ _VLM_REGION_MIN_AREA = 0.01
 _VLM_REGION_MAX_AREA = 0.99
 _VLM_PLAN_VIEW_PAGE_BOUNDS_TOL = 0.05
 
+# Plan-view derivation tunables (SOLUTION-DESIGN-V2 §5.3, third revision).
+#
+# The auxiliary-first VLM-first path identifies title / legend / notes /
+# schedule rectangles, then derives plan_view as the page rect with each
+# auxiliary's nearest page edge clipped to the auxiliary's inner edge.
+#
+#   • _PLAN_VIEW_DERIVE_SAFETY_PAD: gap (in normalized [0, 1] page units)
+#     left between the auxiliary's inner edge and the new plan_view edge,
+#     so plan_view doesn't hug a region whose extent slightly exceeded the
+#     model's reported bbox. Tuned conservatively at 1% — large enough to
+#     avoid clipping plan-view content, small enough to not over-shrink.
+#   • _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE: cap on how much any single
+#     auxiliary region is allowed to shrink one edge. A real auxiliary
+#     never takes more than a third of a page dimension; if the VLM
+#     reports a region that would force a >35% clip, the model almost
+#     certainly mis-identified what it returned (whole-page hallucination,
+#     or a region tagged with the wrong type). We log + skip rather than
+#     accept the over-clip.
+_PLAN_VIEW_DERIVE_SAFETY_PAD = 0.01
+_PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE = 0.35
+
+PageEdge = Literal["top", "bottom", "left", "right"]
+_T = TypeVar("_T")
+
 
 class PageCategorizerStage(PipelineStage):
     name = "page_categorize"
@@ -180,26 +209,42 @@ class PageCategorizerStage(PipelineStage):
     # ── VLM-first layout build (primary path) ───────────────────────────────
 
     def _build_layout_via_vlm(self, ctx: PipelineContext) -> PageLayout | None:
-        """Two focused VLM calls → PageLayout, or None on no-go.
+        """Four focused auxiliary-region VLM calls → derived PageLayout, or None.
 
-        Step 1: ``detect_plan_view``. Returns None when bbox is missing or
-        fails the plausibility guard (sub-1% / super-99% / page-bounds).
-        Step 2 is short-circuited in that case — the legend call only runs
-        when we already have a usable plan view.
+        Auxiliary-first refactor (SOLUTION-DESIGN-V2 §5.3, third revision):
+        instead of asking the model to localise plan_view directly (which
+        it consistently over-bounds, returning whole-page rects), we ask
+        for each auxiliary region with its own focused call:
 
-        Step 2: ``detect_legend``. Failure is non-fatal: a legend-call
-        VLMError is logged and ignored, leaving ``layout.legend = None``.
-        ``title_block``, ``schedule`` and ``notes`` are intentionally not
-        populated by this path — they're cosmetic in v2 and the heuristic
-        path still picks them up on best-effort fallback.
+          1. ``detect_title_block`` — banner / sheet-metadata box.
+          2. ``detect_legend``      — symbols + abbreviations table(s).
+          3. ``detect_notes``       — prose paragraphs of instructions.
+          4. ``detect_schedule``    — equipment specification table.
 
-        ``VLMError`` from the plan_view call is allowed to bubble — the
-        caller (``run``) treats it the same as None but logs at warning
-        level.
+        Each call is independent: a VLMError on any one call logs +
+        skips that region and the next call still runs. An empty / null
+        return is the legitimate "no such region on this drawing"
+        answer, also non-failure.
+
+        plan_view is then DERIVED: starting from the page rect, we
+        identify each auxiliary's nearest page edge and clip plan_view
+        on that edge to the auxiliary's inner edge, with a 1% safety
+        pad. Single-edge clips are capped at 35% of the page dimension —
+        an auxiliary that would force a deeper clip is almost certainly
+        a mis-identification (whole-page hallucination), logged + skipped.
+
+        The derived plan_view runs through the same plausibility guard
+        as before (sub-1% / super-99% / page-bounds-within-5%). On
+        failure we return None and the heuristic fallback runs. On
+        success we return a PageLayout populated with both the derived
+        plan_view AND the auxiliary regions we successfully identified
+        — they're load-bearing inputs to plan_view here, so it's natural
+        to surface them.
         """
         assert ctx.source is not None, "ingest must run before page_categorize"
 
         page_w, page_h = _page_dimensions(ctx.source)
+        image = ctx.source.raster_probe
 
         def _project(bbox: tuple[float, float, float, float]) -> RectPt:
             # Pad each VLM bbox by ~3% per edge before scaling. The model
@@ -211,56 +256,103 @@ class PageCategorizerStage(PipelineStage):
             padded = _pad_normalized_bbox(bbox, _VLM_BBOX_PAD_RATIO)
             return _scale_normalized_to_source(padded, page_w, page_h)
 
-        # Step 1 — plan view. The categorizer's contract: no plan view ⇒
-        # no VLM-first layout. Don't waste a legend call on a drawing we
-        # can't even localise the plan view on.
-        plan_view_tool = self._vlm.detect_plan_view(ctx.source.raster_probe)
-        if plan_view_tool.bbox is None:
+        # ── Sequential auxiliary calls. Each one's failure is isolated. ──
+
+        title_tool = _try_detect(
+            self._vlm.detect_title_block,
+            image,
+            label="title_block",
+        )
+        legend_tool = _try_detect(
+            self._vlm.detect_legend,
+            image,
+            label="legend",
+        )
+        notes_tool = _try_detect(
+            self._vlm.detect_notes,
+            image,
+            label="notes",
+        )
+        schedule_tool = _try_detect(
+            self._vlm.detect_schedule,
+            image,
+            label="schedule",
+        )
+
+        # Collect normalized auxiliary bboxes for plan_view derivation.
+        # Each is a list (legend / notes are multi-bbox; title / schedule
+        # contribute at most one). Padding is NOT applied here — we use
+        # the raw model bbox for clipping geometry to avoid double-padding
+        # the boundary plan_view sits next to. Padding is still applied
+        # to the auxiliary regions we emit into the layout fields.
+        aux_normalized: list[tuple[float, float, float, float]] = []
+        if title_tool is not None and title_tool.bbox is not None:
+            aux_normalized.append(title_tool.bbox)
+        if legend_tool is not None:
+            aux_normalized.extend(legend_tool.bboxes)
+        if notes_tool is not None:
+            aux_normalized.extend(notes_tool.bboxes)
+        if schedule_tool is not None and schedule_tool.bbox is not None:
+            aux_normalized.append(schedule_tool.bbox)
+
+        logger.info(
+            "page_categorize: vlm-first: auxiliaries identified — "
+            "title=%s legend=%d notes=%d schedule=%s",
+            "yes" if (title_tool and title_tool.bbox) else "no",
+            len(legend_tool.bboxes) if legend_tool else 0,
+            len(notes_tool.bboxes) if notes_tool else 0,
+            "yes" if (schedule_tool and schedule_tool.bbox) else "no",
+        )
+
+        derived_plan = _derive_plan_view_normalized(aux_normalized)
+        if derived_plan is None:
             logger.info(
-                "page_categorize: vlm-first: plan_view=None; falling back to heuristic"
+                "page_categorize: vlm-first: derived plan_view collapsed; "
+                "falling back to heuristic"
             )
             return None
 
-        if not _is_plan_view_bbox_plausible(plan_view_tool.bbox):
+        if not _is_plan_view_bbox_plausible(derived_plan):
             logger.info(
                 "page_categorize: vlm-first: failing back to heuristic "
-                "(plan_view failed plausibility guard: %s)",
-                plan_view_tool.bbox,
+                "(derived plan_view failed plausibility guard: %s)",
+                derived_plan,
             )
             return None
 
-        plan_view = _project(plan_view_tool.bbox)
-        logger.info("page_categorize: vlm-first: plan_view=%s", plan_view_tool.bbox)
+        plan_view = _project(derived_plan)
+        logger.info(
+            "page_categorize: vlm-first: derived plan_view=%s",
+            tuple(round(v, 3) for v in derived_plan),
+        )
 
-        # Step 2 — legend. Independent VLMError handling: a legend failure
-        # shouldn't waste the successful plan_view call. Empty bboxes is a
-        # legitimate "no legend on this drawing" answer, NOT a failure.
+        # Surface the auxiliaries we identified into the layout — they're
+        # load-bearing here (they shaped plan_view) so the consumer side
+        # benefits from the same regions. Each is padded + scaled to
+        # source coords; multi-block legend / notes are unioned via
+        # _bounding_rect for fields that expect a single rect.
+        title_block: RectPt | None = None
+        if title_tool is not None and title_tool.bbox is not None:
+            title_block = _project(title_tool.bbox)
+
         legend: RectPt | None = None
-        try:
-            legend_tool = self._vlm.detect_legend(ctx.source.raster_probe)
-        except VLMError as exc:
-            logger.warning(
-                "page_categorize: vlm-first: legend call failed (%s); "
-                "keeping plan_view, legend=None",
-                exc,
-            )
-        else:
-            if legend_tool.bboxes:
-                legend = _bounding_rect([_project(b) for b in legend_tool.bboxes])
-            logger.info(
-                "page_categorize: vlm-first: legend=%s",
-                legend if legend is not None else "none",
-            )
+        if legend_tool is not None and legend_tool.bboxes:
+            legend = _bounding_rect([_project(b) for b in legend_tool.bboxes])
 
-        # title_block / schedule / notes intentionally None / [] on the
-        # VLM-first path (see module docstring). Heuristic populates them
-        # on best-effort when it runs.
+        notes: list[RectPt] = []
+        if notes_tool is not None:
+            notes = [_project(b) for b in notes_tool.bboxes]
+
+        schedule: RectPt | None = None
+        if schedule_tool is not None and schedule_tool.bbox is not None:
+            schedule = _project(schedule_tool.bbox)
+
         return PageLayout(
             plan_view=plan_view,
             legend=legend,
-            schedule=None,
-            title_block=None,
-            notes=[],
+            schedule=schedule,
+            title_block=title_block,
+            notes=notes,
         )
 
     # ── Heuristic layout build (fallback) ───────────────────────────────────
@@ -415,6 +507,159 @@ class PageCategorizerStage(PipelineStage):
 
 
 # ── VLM-first plausibility + scaling helpers ─────────────────────────────────
+
+
+def _try_detect(
+    fn: Callable[[Image.Image], _T],
+    image: Image.Image,
+    *,
+    label: str,
+) -> _T | None:
+    """Run a focused auxiliary VLM call with isolated failure handling.
+
+    Each auxiliary detector (title / legend / notes / schedule) is
+    independent — a VLMError on one of them must not block the others.
+    Returns the tool result on success or ``None`` on VLMError, with a
+    WARNING log naming the affected detector. The caller treats ``None``
+    as "this region wasn't successfully identified" and skips it during
+    plan_view derivation.
+    """
+    try:
+        return fn(image)
+    except VLMError as exc:
+        logger.warning(
+            "page_categorize: vlm-first: %s call failed (%s); skipping region",
+            label,
+            exc,
+        )
+        return None
+
+
+def _nearest_edge(
+    bbox: tuple[float, float, float, float],
+) -> PageEdge:
+    """Pick the page edge closest to a normalized [0, 1] bbox.
+
+    Computes distance from each of the four page edges to the bbox's
+    nearest-side coordinate and returns the smallest. Ties broken in
+    deterministic order (top, bottom, left, right) — this matches the
+    intuitive "title at the very top of the sheet sits on the top edge"
+    case; deeper nesting falls into stable buckets.
+    """
+    x0, y0, x1, y1 = bbox
+    distances: list[tuple[float, PageEdge]] = [
+        (y0, "top"),
+        (1.0 - y1, "bottom"),
+        (x0, "left"),
+        (1.0 - x1, "right"),
+    ]
+    # min() with a stable iteration order — Python's min is left-stable,
+    # matching our preferred tie-break (top before bottom before left
+    # before right). The float key dominates; the tuple ordering only
+    # disambiguates exact ties.
+    return min(distances, key=lambda d: d[0])[1]
+
+
+def _derive_plan_view_normalized(
+    aux_regions: list[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float] | None:
+    """Derive plan_view from page rect minus identified auxiliaries.
+
+    Operates entirely in normalized [0, 1] coords for clarity — the
+    caller scales to source coords via ``_scale_normalized_to_source``.
+    Algorithm:
+
+      1. Start with the full page rect (0, 0, 1, 1).
+      2. For each auxiliary region, identify its nearest page edge.
+      3. Clip plan_view's edge to the auxiliary's inner edge minus a
+         1% safety pad (so plan_view doesn't hug the auxiliary's
+         reported boundary).
+      4. Reject any clip that would shrink a single edge by more than
+         35% of the page dimension — that's a mis-identification
+         signal (real auxiliaries don't take up a third of the page).
+         Log the skip and continue.
+      5. When multiple auxiliaries land on the same edge, the deepest
+         clip wins automatically (we take the running min/max).
+      6. Returns ``None`` if the resulting rect has any non-positive
+         dimension — the auxiliaries collectively consumed plan_view.
+
+    The 35% cap is per-edge per-region: each auxiliary is checked
+    independently against the page's relevant dimension (page_h for
+    top/bottom edges, page_w for left/right). Page is normalized so
+    page_w = page_h = 1.0 here.
+    """
+    # Plan view starts as the full page; each clip shrinks one edge.
+    px0, py0, px1, py1 = 0.0, 0.0, 1.0, 1.0
+    for aux in aux_regions:
+        edge = _nearest_edge(aux)
+        ax0, ay0, ax1, ay1 = aux
+        # The "inner edge" of an auxiliary is the side facing the rest
+        # of the page — opposite the page edge it sits on.
+        if edge == "top":
+            new_y0 = ay1 + _PLAN_VIEW_DERIVE_SAFETY_PAD
+            clip_amount = new_y0 - py0
+            if clip_amount > _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE:
+                logger.warning(
+                    "page_categorize: vlm-first: skipping aux region %s — "
+                    "would clip top edge by %.2f (cap %.2f)",
+                    tuple(round(v, 3) for v in aux),
+                    clip_amount,
+                    _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE,
+                )
+                continue
+            if new_y0 > py0:
+                py0 = new_y0
+        elif edge == "bottom":
+            new_y1 = ay0 - _PLAN_VIEW_DERIVE_SAFETY_PAD
+            clip_amount = py1 - new_y1
+            if clip_amount > _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE:
+                logger.warning(
+                    "page_categorize: vlm-first: skipping aux region %s — "
+                    "would clip bottom edge by %.2f (cap %.2f)",
+                    tuple(round(v, 3) for v in aux),
+                    clip_amount,
+                    _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE,
+                )
+                continue
+            if new_y1 < py1:
+                py1 = new_y1
+        elif edge == "left":
+            new_x0 = ax1 + _PLAN_VIEW_DERIVE_SAFETY_PAD
+            clip_amount = new_x0 - px0
+            if clip_amount > _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE:
+                logger.warning(
+                    "page_categorize: vlm-first: skipping aux region %s — "
+                    "would clip left edge by %.2f (cap %.2f)",
+                    tuple(round(v, 3) for v in aux),
+                    clip_amount,
+                    _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE,
+                )
+                continue
+            if new_x0 > px0:
+                px0 = new_x0
+        else:  # right
+            new_x1 = ax0 - _PLAN_VIEW_DERIVE_SAFETY_PAD
+            clip_amount = px1 - new_x1
+            if clip_amount > _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE:
+                logger.warning(
+                    "page_categorize: vlm-first: skipping aux region %s — "
+                    "would clip right edge by %.2f (cap %.2f)",
+                    tuple(round(v, 3) for v in aux),
+                    clip_amount,
+                    _PLAN_VIEW_DERIVE_MAX_CLIP_PER_EDGE,
+                )
+                continue
+            if new_x1 < px1:
+                px1 = new_x1
+        logger.info(
+            "page_categorize: vlm-first: clipped %s edge by aux=%s",
+            edge,
+            tuple(round(v, 3) for v in aux),
+        )
+
+    if px1 - px0 <= 0 or py1 - py0 <= 0:
+        return None
+    return (px0, py0, px1, py1)
 
 
 def _normalized_bbox_area(bbox: tuple[float, float, float, float]) -> float:
