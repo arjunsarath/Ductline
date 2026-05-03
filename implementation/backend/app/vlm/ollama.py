@@ -200,10 +200,7 @@ class OllamaVisionClient(VLMClient):
         ``categorize_region``; schema failures surface as VLMError so the
         calling stage can fall back to the heuristic path.
         """
-        prompt_path = _PROMPTS_DIR / "detect_page_regions.txt"
-        if not prompt_path.exists():
-            raise VLMError("page-regions prompt missing: detect_page_regions.txt")
-        prompt = prompt_path.read_text(encoding="utf-8")
+        prompt = _load_model_specific_prompt("detect_page_regions.txt", self._model)
 
         downscaled, _ = _downscale_for_vlm(image, _VLM_LONG_EDGE_PX)
         payload = {
@@ -234,10 +231,10 @@ class OllamaVisionClient(VLMClient):
                 f"VLM page-regions JSON failed schema: {exc.error_count()} errors"
             ) from exc
         logger.info(
-            "vlm.detect_page_regions: done plan_view=%s legend=%s schedule=%s "
+            "vlm.detect_page_regions: done plan_view=%s legend=%d schedule=%s "
             "title_block=%s notes=%d elapsed=%.2fs",
             tool.plan_view is not None,
-            tool.legend is not None,
+            len(tool.legend),
             tool.schedule is not None,
             tool.title_block is not None,
             len(tool.notes),
@@ -358,6 +355,36 @@ def _load_prompt(version: str) -> str:
     if not path.exists():
         raise VLMError(f"prompt version not found: {version}")
     return path.read_text(encoding="utf-8")
+
+
+def _load_model_specific_prompt(filename: str, model: str) -> str:
+    """Load a prompt file, preferring a model-specific variant if present.
+
+    Resolution order:
+      1. ``prompts/{model_slug}/{filename}`` — per-VLM tuned variant.
+      2. ``prompts/{filename}`` — default fallback shared across models.
+
+    The model slug is the model name with ``:tag`` stripped (e.g.
+    ``llama3.2-vision:latest`` → ``llama3.2-vision``). Different VLMs
+    have very different sweet spots — small local models like
+    llama3.2-vision want short, abstract, schema-only prompts; larger
+    hosted models can handle longer instructions and chain-of-thought.
+    Per-VLM versioning lets us refine each one independently without
+    cross-model regression risk.
+
+    Raises ``VLMError`` if neither variant exists.
+    """
+    model_slug = model.split(":")[0]
+    specific = _PROMPTS_DIR / model_slug / filename
+    if specific.exists():
+        return specific.read_text(encoding="utf-8")
+    default = _PROMPTS_DIR / filename
+    if not default.exists():
+        raise VLMError(
+            f"prompt missing: {filename} (no model-specific variant for '{model_slug}', "
+            f"no default at {default})"
+        )
+    return default.read_text(encoding="utf-8")
 
 
 def _render_tile_prompt(

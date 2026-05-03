@@ -200,27 +200,27 @@ class PageCategorizerStage(PipelineStage):
             return None
 
         page_w, page_h = _page_dimensions(ctx.source)
-        plan_view = _scale_normalized_to_source(
-            tool.plan_view, page_w, page_h
-        )
-        legend = (
-            _scale_normalized_to_source(tool.legend, page_w, page_h)
-            if tool.legend is not None
-            else None
-        )
-        schedule = (
-            _scale_normalized_to_source(tool.schedule, page_w, page_h)
-            if tool.schedule is not None
-            else None
-        )
-        title_block = (
-            _scale_normalized_to_source(tool.title_block, page_w, page_h)
-            if tool.title_block is not None
-            else None
-        )
-        notes = [
-            _scale_normalized_to_source(n, page_w, page_h) for n in tool.notes
-        ]
+
+        def _project(bbox: tuple[float, float, float, float]) -> RectPt:
+            # Pad each VLM bbox by ~3% per edge before scaling. The model
+            # consistently under-estimates region extents — page-region
+            # tasks aren't its training sweet spot and it tends to bound
+            # tight to the densest visible content, clipping outer text
+            # and graphics. A small uniform pad recovers most of the
+            # missed periphery without significantly polluting plan_view.
+            padded = _pad_normalized_bbox(bbox, _VLM_BBOX_PAD_RATIO)
+            return _scale_normalized_to_source(padded, page_w, page_h)
+
+        plan_view = _project(tool.plan_view)
+        # Multi-block legend: the VLM may return one entry (single legend
+        # box) or two (symbols + abbreviations split). PageLayout.legend is
+        # a single rect — compute the bounding rect of all returned blocks
+        # so downstream consumers (LegendParserStage) work on a contiguous
+        # area. Padding is applied to each input block before union.
+        legend = _bounding_rect([_project(b) for b in tool.legend]) if tool.legend else None
+        schedule = _project(tool.schedule) if tool.schedule is not None else None
+        title_block = _project(tool.title_block) if tool.title_block is not None else None
+        notes = [_project(n) for n in tool.notes]
         return PageLayout(
             plan_view=plan_view,
             legend=legend,
@@ -433,6 +433,51 @@ def _scale_normalized_to_source(
     """Scale a normalized [0, 1] bbox to the source's coord space."""
     x0, y0, x1, y1 = bbox
     return (x0 * page_w, y0 * page_h, x1 * page_w, y1 * page_h)
+
+
+# Per-edge padding applied to VLM-returned normalized bboxes before
+# scaling to source coords. Empirically the model under-estimates region
+# extents — see commit message. Padding is conservative (3%) so it
+# rarely overlaps neighbouring regions, but large enough to recover
+# clipped edge-of-region content. Clamped to [0, 1] to stay on-page.
+_VLM_BBOX_PAD_RATIO = 0.03
+
+
+def _pad_normalized_bbox(
+    bbox: tuple[float, float, float, float],
+    ratio: float,
+) -> tuple[float, float, float, float]:
+    """Expand a normalized [0, 1] bbox by ``ratio`` of page dims on each side.
+
+    Stays inside the page (clamped to [0, 1]) so a region near the page
+    edge doesn't grow off-page. Width and height are scaled by the same
+    ratio rather than by the bbox's own dimensions — the model's clipping
+    error is page-relative, not bbox-relative.
+    """
+    x0, y0, x1, y1 = bbox
+    return (
+        max(0.0, x0 - ratio),
+        max(0.0, y0 - ratio),
+        min(1.0, x1 + ratio),
+        min(1.0, y1 + ratio),
+    )
+
+
+def _bounding_rect(rects: list[RectPt]) -> RectPt | None:
+    """Smallest axis-aligned rect enclosing every rect in ``rects``.
+
+    Used to merge multiple VLM-returned legend blocks (symbols + abbr-
+    eviations split across the page) into the single rect PageLayout
+    expects. Returns None on empty input so callers can keep the field
+    typed as ``RectPt | None``.
+    """
+    if not rects:
+        return None
+    x0 = min(r[0] for r in rects)
+    y0 = min(r[1] for r in rects)
+    x1 = max(r[2] for r in rects)
+    y1 = max(r[3] for r in rects)
+    return (x0, y0, x1, y1)
 
 
 # ── Geometry helpers (pixel ↔ source coords) ─────────────────────────────────

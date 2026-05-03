@@ -80,7 +80,11 @@ class PageRegionsTool(BaseModel):
     """
 
     plan_view: tuple[float, float, float, float] | None = None
-    legend: tuple[float, float, float, float] | None = None
+    # legend is a list — engineering drawings frequently split the legend
+    # into a symbol box AND a separate abbreviation table. Returning both
+    # rather than guessing a bounding rect over empty space lets the
+    # categorizer compute the union deliberately. Empty list ⇒ no legend.
+    legend: list[tuple[float, float, float, float]] = Field(default_factory=list)
     schedule: tuple[float, float, float, float] | None = None
     title_block: tuple[float, float, float, float] | None = None
     notes: list[tuple[float, float, float, float]] = Field(default_factory=list)

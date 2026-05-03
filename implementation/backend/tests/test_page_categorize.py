@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from PIL import Image, ImageDraw
 
 from app.ocr.base import OCRMatch
@@ -623,7 +624,9 @@ def test_vlm_first_populates_layout_when_returns_valid() -> None:
     vlm = _StubVLM(
         page_regions_result=PageRegionsTool(
             plan_view=(0.05, 0.05, 0.70, 0.95),
-            legend=(0.72, 0.05, 0.98, 0.40),
+            # legend is now a list — the model may return one or more
+            # blocks (symbol box + abbreviation table commonly split).
+            legend=[(0.72, 0.05, 0.98, 0.40)],
             schedule=(0.72, 0.42, 0.98, 0.70),
             title_block=(0.72, 0.85, 0.98, 0.98),
             notes=[(0.72, 0.72, 0.98, 0.84)],
@@ -634,8 +637,13 @@ def test_vlm_first_populates_layout_when_returns_valid() -> None:
 
     assert ctx.layout is not None
     # Plan view scaled to source coords (raster source → pixel size).
-    assert ctx.layout.plan_view == (0.05 * 800, 0.05 * 600, 0.70 * 800, 0.95 * 600)
-    assert ctx.layout.legend == (0.72 * 800, 0.05 * 600, 0.98 * 800, 0.40 * 600)
+    # Each VLM bbox is padded by 3% per edge before scaling — see
+    # `_VLM_BBOX_PAD_RATIO` in categorize.py. plan_view (0.05, 0.05, 0.70,
+    # 0.95) → padded (0.02, 0.02, 0.73, 0.98) → scaled (16, 12, 584, 588).
+    assert ctx.layout.plan_view == pytest.approx((16.0, 12.0, 584.0, 588.0))
+    # legend (0.72, 0.05, 0.98, 0.40) → padded (0.69, 0.02, 1.0, 0.43)
+    # (right edge clamped at 1.0) → scaled (552, 12, 800, 258).
+    assert ctx.layout.legend == pytest.approx((552.0, 12.0, 800.0, 258.0))
     assert ctx.layout.schedule is not None
     assert ctx.layout.title_block is not None
     assert len(ctx.layout.notes) == 1
@@ -717,7 +725,12 @@ def test_vlm_first_falls_back_on_vlm_error() -> None:
 
 
 def test_vlm_first_scales_normalized_bboxes_correctly() -> None:
-    """plan_view = (0.1, 0.1, 0.9, 0.9) on 800×600 page → (80, 60, 720, 540)."""
+    """Padded VLM plan_view (0.1, 0.1, 0.9, 0.9) on 800×600 → (56, 42, 744, 558).
+
+    Each edge of the VLM bbox is padded by 3% of page dims before scaling
+    (the model consistently under-estimates region extents). 0.1 - 0.03 =
+    0.07; 0.9 + 0.03 = 0.93. Scaled to 800×600: (56, 42, 744, 558).
+    """
     img = _blank_image(800, 600)
     src = _raster_source(img)
     ctx = _ctx_with(src, _ocr_cache([]))
@@ -730,4 +743,34 @@ def test_vlm_first_scales_normalized_bboxes_correctly() -> None:
     PageCategorizerStage(vlm).run(ctx)
 
     assert ctx.layout is not None
-    assert ctx.layout.plan_view == (80.0, 60.0, 720.0, 540.0)
+    assert ctx.layout.plan_view == pytest.approx((56.0, 42.0, 744.0, 558.0))
+
+
+def test_vlm_first_unions_multi_block_legend() -> None:
+    """Multi-block legend → PageLayout.legend is the bounding rect of all blocks.
+
+    Engineering drawings frequently split the legend into a symbol icon
+    box AND a separate abbreviation table. The categorizer unions the two
+    so LegendParserStage downstream sees one contiguous legend rect.
+    """
+    img = _blank_image(800, 600)
+    src = _raster_source(img)
+    ctx = _ctx_with(src, _ocr_cache([]))
+    vlm = _StubVLM(
+        page_regions_result=PageRegionsTool(
+            plan_view=(0.05, 0.05, 0.65, 0.95),
+            legend=[
+                (0.70, 0.10, 0.95, 0.40),  # upper symbol box
+                (0.70, 0.55, 0.95, 0.85),  # lower abbreviation table
+            ],
+        )
+    )
+
+    PageCategorizerStage(vlm).run(ctx)
+
+    assert ctx.layout is not None
+    # Each input is padded individually then unioned. Upper box padded:
+    # (0.67, 0.07, 0.98, 0.43); lower box padded: (0.67, 0.52, 0.98, 0.88).
+    # Bounding rect: (0.67, 0.07, 0.98, 0.88) → scaled to 800×600:
+    # (536, 42, 784, 528).
+    assert ctx.layout.legend == pytest.approx((536.0, 42.0, 784.0, 528.0))
