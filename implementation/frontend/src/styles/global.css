@@ -351,6 +351,17 @@ a {
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
+.samples-title {
+  margin: 0;
+  padding: 14px 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
 .samples-panel-hint {
   font-size: 12px;
   color: var(--text-muted);

@@ -21,3 +21,15 @@ def get_pipeline() -> DetectionPipeline:
         vlm=build_vlm_client(settings),
         ocr=RapidOCRExtractor(),
     )
+
+
+@lru_cache(maxsize=1)
+def build_ocr() -> RapidOCRExtractor:
+    """Process-singleton OCR engine, shared across V3 requests.
+
+    The first call lazy-loads the ONNX models (~50 MB on disk after the
+    initial download). Caching avoids re-walking that path per request,
+    which made the browser-driven /v3/render flow appear stuck for
+    10–20 seconds on each call.
+    """
+    return RapidOCRExtractor()

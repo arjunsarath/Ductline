@@ -21,6 +21,8 @@ dependencies = [
     # ADR-0006 escape hatch / SOLUTION-DESIGN §11 open question 2.
     "rapidocr-onnxruntime==1.4.4",
     "httpx==0.27.2",
+    "pyyaml>=6.0.3",
+    "scikit-image>=0.26.0",
 ]
 
 [project.optional-dependencies]

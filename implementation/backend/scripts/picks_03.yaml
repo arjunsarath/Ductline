@@ -1,0 +1,17 @@
+# Color picks for drawing 03-caddsultants-shop.pdf
+# The blue rectangular outline around each duct run.
+# These HSV ranges are the validated values from the V3 spike (88% accuracy).
+
+picks:
+  - label: "Supply Air"
+    pattern: outline
+    kind: supply
+    primary:
+      h_lo: 100
+      h_hi: 130
+      s_lo: 80
+      s_hi: 255
+      v_lo: 80
+      v_hi: 255
+    display_color_bgr: [255, 100, 0]   # blue-orange overlay
+    system_id: sys_supply_blue
