@@ -24,10 +24,14 @@ class SystemMask:
     """Output of color masking for a single picked system."""
 
     pick: ColorPick
-    mask: NDArray[np.uint8]      # raw inRange result (walls/lines only)
-    filled: NDArray[np.uint8]    # post-processed: full duct extent for outline; thickened line for centerline
-    skel: NDArray[np.uint8]      # skeletonised filled
-    dt: NDArray[np.float32]      # distance transform of filled — DT[y,x] = px distance to nearest non-filled
+    mask: NDArray[np.uint8]  # raw inRange result (walls/lines only)
+    filled: NDArray[
+        np.uint8
+    ]  # post-processed: full duct extent for outline; thickened line for centerline
+    skel: NDArray[np.uint8]  # skeletonised filled
+    dt: NDArray[
+        np.float32
+    ]  # distance transform of filled — DT[y,x] = px distance to nearest non-filled
 
 
 def hsv_inrange(hsv: NDArray[np.uint8], pick: ColorPick) -> NDArray[np.uint8]:
@@ -68,7 +72,8 @@ def fill_outline(mask: NDArray[np.uint8], close_k: int) -> NDArray[np.uint8]:
 
 
 def drop_small_components(
-    mask: NDArray[np.uint8], min_area_px: int,
+    mask: NDArray[np.uint8],
+    min_area_px: int,
 ) -> NDArray[np.uint8]:
     """Remove connected components in ``mask`` smaller than ``min_area_px``.
 
@@ -197,19 +202,12 @@ def build_system_mask(
     config: V3PipelineConfig,
     *,
     text_mask: NDArray[np.uint8] | None = None,
-    text_bboxes: list[tuple[int, int, int, int]] | None = None,
 ) -> SystemMask:
     """Run mask + pattern-specific fill + skeleton + distance-transform for one pick.
 
     ``text_mask`` (binary OCR-bbox image) drives the area-overlap filter —
     a maroon TEXT label whose color matches the pick gets caught by
     inRange and the fill component is mostly text, so it's dropped.
-
-    ``text_bboxes`` (raw bbox list) drives the *count* filter — a
-    component that contains many OCR tokens is a title block / notes
-    block, not a duct. Distinct from the area-overlap filter because a
-    title block has lots of whitespace between text rows, so its
-    area-overlap stays under 50% even though the token count is 10+.
     """
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     raw = hsv_inrange(hsv, pick)
@@ -221,10 +219,14 @@ def build_system_mask(
 
     filled = drop_small_components(filled, config.min_component_area_px)
     filled = drop_blob_components(
-        filled, config.blob_area_floor_px, config.blob_fill_ratio_max,
+        filled,
+        config.blob_area_floor_px,
+        config.blob_fill_ratio_max,
     )
     filled = drop_text_components(
-        filled, text_mask, overlap_threshold=config.text_overlap_threshold,
+        filled,
+        text_mask,
+        overlap_threshold=config.text_overlap_threshold,
     )
     skel = (skeletonize(filled > 0).astype(np.uint8)) * 255
     dt = cv2.distanceTransform(filled, cv2.DIST_L2, 5)
@@ -237,15 +239,9 @@ def build_all_system_masks(
     config: V3PipelineConfig,
     *,
     text_mask: NDArray[np.uint8] | None = None,
-    text_bboxes: list[tuple[int, int, int, int]] | None = None,
 ) -> list[SystemMask]:
     """Build masks for every pick. Empty masks are returned in-place — the
     runner promotes them to a per-system warning rather than skipping
     silently, so the user knows which color produced no segments.
     """
-    return [
-        build_system_mask(
-            img_bgr, p, config, text_mask=text_mask, text_bboxes=text_bboxes,
-        )
-        for p in config.picks
-    ]
+    return [build_system_mask(img_bgr, p, config, text_mask=text_mask) for p in config.picks]

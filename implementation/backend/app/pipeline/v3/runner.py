@@ -4,9 +4,10 @@ Reuses V1/V2's ``IngestStage`` and ``ProbeOCRStage`` (they handle file
 parsing + rotation + smallest-text measurement). Everything after that
 is V3-specific and deterministic.
 
-This runner is independent of V1/V2's ``DetectionPipeline`` — they
-coexist in the codebase. V3 is wired through its own CLI in
-``scripts/run_v3.py``; API integration lands in a follow-up PR.
+This runner does not share V1/V2's ``DetectionPipeline`` class — the
+two coexist in the codebase. V3 is wired through ``app.api.v3_routes``
+(``POST /v3/render`` and ``POST /v3/detect``); ``scripts/run_v3.py``
+also drives it for CLI smoke checks.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from app.config import settings
-from app.ocr.base import OCRExtractor
+from app.ocr.base import OCRExtractor, OCRMatch
 from app.pipeline.base import PipelineContext
 from app.pipeline.ingest import IngestStage
 from app.pipeline.probe_ocr import ProbeOCRStage
@@ -38,7 +39,7 @@ from app.pipeline.v3.calibrate import (
     resolve_visible_sides,
 )
 from app.pipeline.v3.color_mask import SystemMask, build_all_system_masks
-from app.pipeline.v3.config import V3PipelineConfig
+from app.pipeline.v3.config import ColorPick, V3PipelineConfig
 from app.pipeline.v3.ocr_classify import (
     classify_all,
     detect_page_unit,
@@ -76,6 +77,10 @@ class V3Segment:
     delta_pct: float
     dim_confidence: Literal["high", "medium", "low"]
     dim_source: str
+    # Which attribution rule produced this segment — propagated from
+    # ``AttributedToken.rule`` so the popover can surface the reasoning
+    # trace V3 §5.7 specifies (in_mask vs proximity).
+    rule: Literal["in_mask", "proximity"]
     pressure: PressureResult
     skel_xy: tuple[int, int]
     token_text: str
@@ -139,7 +144,10 @@ class V3DetectionPipeline:
     ) -> V3Result:
         """Convenience wrapper — see ``run_with_artifacts`` for the full return."""
         result, _ = self.run_with_artifacts(
-            file_bytes, original_filename, config, drawing_id=drawing_id,
+            file_bytes,
+            original_filename,
+            config,
+            drawing_id=drawing_id,
         )
         return result
 
@@ -208,17 +216,19 @@ class V3DetectionPipeline:
         rotated_pil = rendered_pil.rotate(-90, expand=True)
         matches_v = ocr_full_page(rotated_pil, self._ocr)
         matches_v_remapped = _remap_bboxes_from_cw90(
-            matches_v, original_hw=(height_px, width_px),
+            matches_v,
+            original_hw=(height_px, width_px),
         )
         all_text_for_mask = list(matches) + matches_v_remapped
         text_mask = _ocr_text_mask(
-            (height_px, width_px), all_text_for_mask, pad_px=3,
+            (height_px, width_px),
+            all_text_for_mask,
+            pad_px=3,
         )
-        text_bboxes = [tuple(m.bbox) for m in all_text_for_mask]
         system_masks = build_all_system_masks(
-            rendered_bgr, config,
+            rendered_bgr,
+            config,
             text_mask=text_mask,
-            text_bboxes=text_bboxes,
         )
 
         rect_tokens = [t for t in page_tokens if t.kind == "dim_rect"]
@@ -250,13 +260,16 @@ class V3DetectionPipeline:
             pick = sm.pick
             visible_unit = r.visible
             hidden_unit = r.hidden
-            flow_for_seg = _nearest_flow(r.attributed, flows_by_system.get(r.attributed.system_index, []))
+            flow_for_seg = _nearest_flow(
+                r.attributed, flows_by_system.get(r.attributed.system_index, [])
+            )
             if flow_for_seg is not None:
                 pressure = from_flow(
                     width_unit=float(visible_unit),
                     height_unit=float(hidden_unit),
                     flow_value=float(flow_for_seg.token.flow_value or 0),
-                    flow_unit=flow_for_seg.token.flow_unit or ("CFM" if page_unit == "in" else "L/s"),
+                    flow_unit=flow_for_seg.token.flow_unit
+                    or ("CFM" if page_unit == "in" else "L/s"),
                     page_unit=page_unit,
                 )
             else:
@@ -265,22 +278,25 @@ class V3DetectionPipeline:
                     height_unit=float(hidden_unit),
                     page_unit=page_unit,
                 )
-            segments.append(V3Segment(
-                id=f"seg_{i:04d}",
-                system_id=pick.system_id or _default_system_id(pick),
-                shape="rectangular",
-                visible_unit=visible_unit,
-                hidden_unit=hidden_unit,
-                page_unit=page_unit,
-                pixel_width=r.attributed.width_px,
-                chosen_ppu=r.chosen_ppu,
-                delta_pct=r.delta_pct,
-                dim_confidence=r.confidence,
-                dim_source="ocr:in_mask",
-                pressure=pressure,
-                skel_xy=r.attributed.skel_xy,
-                token_text=r.attributed.token.text,
-            ))
+            segments.append(
+                V3Segment(
+                    id=f"seg_{i:04d}",
+                    system_id=pick.system_id or _default_system_id(pick),
+                    shape="rectangular",
+                    visible_unit=visible_unit,
+                    hidden_unit=hidden_unit,
+                    page_unit=page_unit,
+                    pixel_width=r.attributed.width_px,
+                    chosen_ppu=r.chosen_ppu,
+                    delta_pct=r.delta_pct,
+                    dim_confidence=r.confidence,
+                    dim_source="ocr:in_mask",
+                    rule=r.attributed.rule,
+                    pressure=pressure,
+                    skel_xy=r.attributed.skel_xy,
+                    token_text=r.attributed.token.text,
+                )
+            )
 
         # ── Round-duct segments — only emitted once we have a global ppu
         # to validate against. Each round token's implied ppu is
@@ -309,24 +325,29 @@ class V3DetectionPipeline:
                 # same area. Tracked in V3 §10 as phase-2 work.
                 d = float(tok.diameter)
                 pressure = from_size_only(
-                    width_unit=d, height_unit=d, page_unit=page_unit,
-                )
-                segments.append(V3Segment(
-                    id=f"seg_{len(segments):04d}",
-                    system_id=pick.system_id or _default_system_id(pick),
-                    shape="round",
-                    visible_unit=int(d),
-                    hidden_unit=int(d),
+                    width_unit=d,
+                    height_unit=d,
                     page_unit=page_unit,
-                    pixel_width=p.width_px,
-                    chosen_ppu=implied_ppu,
-                    delta_pct=delta_pct,
-                    dim_confidence=confidence,
-                    dim_source="ocr:in_mask",
-                    pressure=pressure,
-                    skel_xy=p.skel_xy,
-                    token_text=tok.text,
-                ))
+                )
+                segments.append(
+                    V3Segment(
+                        id=f"seg_{len(segments):04d}",
+                        system_id=pick.system_id or _default_system_id(pick),
+                        shape="round",
+                        visible_unit=int(d),
+                        hidden_unit=int(d),
+                        page_unit=page_unit,
+                        pixel_width=p.width_px,
+                        chosen_ppu=implied_ppu,
+                        delta_pct=delta_pct,
+                        dim_confidence=confidence,
+                        dim_source="ocr:in_mask",
+                        rule=p.rule,
+                        pressure=pressure,
+                        skel_xy=p.skel_xy,
+                        token_text=tok.text,
+                    )
+                )
 
         system_summaries = [
             V3SystemSummary(
@@ -336,7 +357,11 @@ class V3DetectionPipeline:
                 kind=sm.pick.kind,
                 mask_pixels=int(sm.mask.sum() // 255),
                 filled_pixels=int(sm.filled.sum() // 255),
-                n_segments=sum(1 for s in segments if s.system_id == (sm.pick.system_id or _default_system_id(sm.pick))),
+                n_segments=sum(
+                    1
+                    for s in segments
+                    if s.system_id == (sm.pick.system_id or _default_system_id(sm.pick))
+                ),
             )
             for sm in system_masks
         ]
@@ -384,7 +409,8 @@ class V3DetectionPipeline:
             if ctx.ocr_cache is not None:
                 target_dpi = source.smart_dpi_for_rect(
                     rect_pt=(0.0, 0.0, source.page_size_pt[0], source.page_size_pt[1])
-                    if source.page_size_pt else (0.0, 0.0, 1.0, 1.0),
+                    if source.page_size_pt
+                    else (0.0, 0.0, 1.0, 1.0),
                     ocr_cache=ctx.ocr_cache,
                     target_text_px=config.target_text_height_px,
                 )
@@ -402,7 +428,9 @@ class V3DetectionPipeline:
         return settings.raster_dpi, source.raster_probe
 
 
-def _remap_bboxes_from_cw90(matches: list, original_hw: tuple[int, int]) -> list:
+def _remap_bboxes_from_cw90(
+    matches: list[OCRMatch], original_hw: tuple[int, int]
+) -> list[_BBoxOnly]:
     """Remap OCR bboxes from a 90°-CW-rotated page back to original coords.
 
     The bboxes are wrapped in lightweight stand-in objects with the same
@@ -412,7 +440,7 @@ def _remap_bboxes_from_cw90(matches: list, original_hw: tuple[int, int]) -> list
     for downstream classification.
     """
     h, w = original_hw  # original page dims (rotated dims are swapped)
-    out: list = []
+    out: list[_BBoxOnly] = []
     for m in matches:
         rx, ry, rbw, rbh = m.bbox
         # PIL.Image.rotate(-90, expand=True) places original (x, y) at
@@ -427,10 +455,7 @@ def _remap_bboxes_from_cw90(matches: list, original_hw: tuple[int, int]) -> list
         oh = rbw
         out.append(_BBoxOnly(bbox=(ox, oy, ow, oh)))
     # eliminate boxes outside the page (numerical noise near edges)
-    return [
-        b for b in out
-        if 0 <= b.bbox[0] < w and 0 <= b.bbox[1] < h
-    ]
+    return [b for b in out if 0 <= b.bbox[0] < w and 0 <= b.bbox[1] < h]
 
 
 @dataclass(frozen=True)
@@ -446,7 +471,7 @@ class _BBoxOnly:
 
 def _ocr_text_mask(
     shape_hw: tuple[int, int],
-    matches: list,
+    matches: list[OCRMatch] | list[_BBoxOnly] | list,
     pad_px: int,
 ) -> NDArray[np.uint8]:
     """Binary mask of OCR text bboxes — used to exclude text glyphs from
@@ -473,7 +498,7 @@ def _pil_to_bgr(img: Image.Image) -> NDArray[np.uint8]:
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
-def _default_system_id(pick) -> str:
+def _default_system_id(pick: ColorPick) -> str:
     safe = pick.label.lower().replace(" ", "_")
     return f"sys_{safe}"
 
@@ -497,7 +522,7 @@ def _nearest_flow(
         return None
     rx, ry = rect_pair.skel_xy
     best = None
-    best_d2 = max_dist_px ** 2
+    best_d2 = max_dist_px**2
     for f in flows:
         fx, fy = f.skel_xy
         d2 = (fx - rx) ** 2 + (fy - ry) ** 2

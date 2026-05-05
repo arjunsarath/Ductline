@@ -38,19 +38,14 @@ from app.ocr.base import OCRExtractor, OCRMatch
 # The optional quote characters between the number and the ``x`` are the
 # critical bit; without them ``12"x10"`` (the most common US convention)
 # wouldn't match. ``[\"”]`` covers both straight and curly quotes.
-_DIM_RECT = re.compile(
-    r"(?<!\d)(\d{2,4})\s*[\"”]?\s*[xX×]\s*[\"”]?\s*(\d{1,4})(?!\d)"
-)
+_DIM_RECT = re.compile(r"(?<!\d)(\d{2,4})\s*[\"”]?\s*[xX×]\s*[\"”]?\s*(\d{1,4})(?!\d)")
 # Round-duct callouts. The native diameter symbol (Ø) is often misread by
 # OCR as digit ``0`` or capital ``O`` — both observed in drawing 03's
 # bottom plan where ``13"Ø`` was read as ``13"0``. We accept the canonical
 # Ø family and the misread ``["”]\s*[0OQD]`` pattern. The required quote
 # mark prevents matches against feet-inches text like ``13'-10"`` whose
 # tail digits aren't preceded by a quote.
-_DIM_ROUND = re.compile(
-    r"(?<!\d)(\d{1,4})\s*"
-    r"(?:[\"”]?\s*[øØ⌀∅]|[\"”]\s*[0OQD](?!\d))"
-)
+_DIM_ROUND = re.compile(r"(?<!\d)(\d{1,4})\s*" r"(?:[\"”]?\s*[øØ⌀∅]|[\"”]\s*[0OQD](?!\d))")
 _CFM = re.compile(r"(?<!\d)(\d{1,5})\s*CFM", re.IGNORECASE)
 _LPS = re.compile(r"(?<!\d)(\d{1,5})\s*L/?S", re.IGNORECASE)
 

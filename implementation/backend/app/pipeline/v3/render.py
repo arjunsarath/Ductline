@@ -28,13 +28,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from app.pipeline.v3.color_mask import SystemMask
-from app.pipeline.v3.runner import V3Result
 
 
 def render_overlay(
     rendered_bgr: NDArray[np.uint8],
     system_masks: list[SystemMask],
-    result: V3Result,  # kept for API stability; segments are drawn frontend-side
     *,
     mask_alpha: float = 0.4,
     contour_thickness: int = 3,
@@ -45,7 +43,6 @@ def render_overlay(
     output is a freshly-allocated RGBA canvas. Frontends layer this over
     the page render and draw segment markers/labels in SVG above it.
     """
-    del result  # not used since per-segment markers moved to the frontend
     height, width = rendered_bgr.shape[:2]
     out = np.zeros((height, width, 4), dtype=np.uint8)
 

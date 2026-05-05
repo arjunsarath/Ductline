@@ -2,8 +2,9 @@
 
 A V3 pipeline run is parameterised by a ``V3PipelineConfig``: the list of
 ``ColorPick``s the user selected, plus the target render DPI and a few
-knobs (search radius, calibration band). Defaults match the spike values
-that produced 88% attribution accuracy on drawing 03.
+knobs (search radius, calibration band). Defaults are tuned against the
+benchmark sweep documented in ``implementation/README.md`` §4 — see that
+table for the per-drawing accuracy each threshold trades off against.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ class V3PipelineConfig:
     raster_min_long_edge_px: int = 3000  # below this, hard error
 
     # Color-mask post-processing.
-    outline_close_kernel: int = 11   # MORPH_CLOSE kernel for Pattern B fill
+    outline_close_kernel: int = 11  # MORPH_CLOSE kernel for Pattern B fill
     centerline_dilate_iters: int = 2  # 3x3 dilation iters for Pattern C
 
     # Component filter — kills text-glyph false positives that share the

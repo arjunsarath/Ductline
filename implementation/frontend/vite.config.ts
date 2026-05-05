@@ -12,6 +12,13 @@ const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
 
 export default defineConfig({
   plugins: [react()],
+  // Resolve TypeScript sources before .js so any stray emit next to a
+  // .tsx (e.g. from a pre-noEmit ``tsc -b`` run) doesn't shadow the real
+  // source the dev server should serve. ``tsconfig.json`` has ``noEmit:true``,
+  // so this is belt-and-braces against future regressions.
+  resolve: {
+    extensions: [".mts", ".ts", ".tsx", ".mjs", ".js", ".jsx", ".json"],
+  },
   server: {
     port: 5173,
     proxy: {
@@ -27,8 +34,8 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     css: false,
-    // tsc -b in `npm run build` emits compiled .js next to .tsx — restrict
-    // test discovery to TypeScript sources so we don't double-run.
+    // Restrict test discovery to TypeScript sources — same belt-and-braces
+    // intent as ``resolve.extensions`` above.
     include: ["src/**/*.test.{ts,tsx}"],
   },
 });

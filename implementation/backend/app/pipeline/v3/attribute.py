@@ -33,9 +33,9 @@ class AttributedToken:
     """A token paired to a system + the local pixel width measured at the token."""
 
     token: ClassifiedToken
-    system_index: int           # index into V3PipelineConfig.picks
-    width_px: float             # measured at the nearest skel pixel
-    skel_xy: tuple[int, int]    # the skeleton point used for width
+    system_index: int  # index into V3PipelineConfig.picks
+    width_px: float  # measured at the nearest skel pixel
+    skel_xy: tuple[int, int]  # the skeleton point used for width
     # Which attribution rule fired:
     #   • ``in_mask``    — bbox row intersects the system's filled mask
     #   • ``proximity``  — bbox didn't intersect any mask, but the
@@ -171,7 +171,10 @@ def attribute_in_mask(
                 anchor_x = int(in_mask_xs[len(in_mask_xs) // 2])
                 anchor_y = cy
             anchor = _nearest_skel_pixel(
-                sm.skel, anchor_x, anchor_y, config.nearest_skel_search_px,
+                sm.skel,
+                anchor_x,
+                anchor_y,
+                config.nearest_skel_search_px,
             )
             if anchor is None:
                 radius_px = float(sm.dt[anchor_y, anchor_x])
@@ -240,7 +243,10 @@ def attribute_round_in_mask(
                 anchor_x = int(in_mask_xs[len(in_mask_xs) // 2])
                 anchor_y = cy
             anchor = _nearest_skel_pixel(
-                sm.skel, anchor_x, anchor_y, config.nearest_skel_search_px,
+                sm.skel,
+                anchor_x,
+                anchor_y,
+                config.nearest_skel_search_px,
             )
             if anchor is None:
                 radius_px = float(sm.dt[anchor_y, anchor_x])

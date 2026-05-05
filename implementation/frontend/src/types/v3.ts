@@ -56,7 +56,8 @@ export interface V3Segment {
   delta_pct: number;
   dim_confidence: Confidence;
   dim_source: string;
-  rule: string;
+  /** Which attribution rule fired for this token — see V3 §5.7. */
+  rule: "in_mask" | "proximity";
   pressure: V3PressureResult;
   skel_xy: [number, number];
   token_text: string;

@@ -307,7 +307,6 @@ export function V3CanvasViewer({
         <V3Popover
           segment={selectedSegment}
           anchor={popoverAnchor}
-          stageHeight={stageRef.current?.clientHeight ?? 0}
           onClose={() => onSelect(null)}
         />
       )}

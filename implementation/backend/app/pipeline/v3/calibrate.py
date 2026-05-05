@@ -29,11 +29,11 @@ from app.pipeline.v3.config import V3PipelineConfig
 
 @dataclass
 class CalibrationResult:
-    ppu: float | None              # px per page-unit (in or mm). None if calibration failed.
-    n_pairs: int                   # how many (token, segment) pairs went in
-    n_in_band: int                 # how many candidates fell in the dominant bin
-    band_lo: float | None          # bin's lower edge
-    band_hi: float | None          # bin's upper edge
+    ppu: float | None  # px per page-unit (in or mm). None if calibration failed.
+    n_pairs: int  # how many (token, segment) pairs went in
+    n_in_band: int  # how many candidates fell in the dominant bin
+    band_lo: float | None  # bin's lower edge
+    band_hi: float | None  # bin's upper edge
 
 
 @dataclass
@@ -41,10 +41,10 @@ class ResolvedDimension:
     """One dim_rect token after visible-side disambiguation + ppu cross-check."""
 
     attributed: AttributedToken
-    visible: int                  # plan-visible side picked from (a, b)
-    hidden: int                   # the other side
-    chosen_ppu: float             # width_px / visible
-    delta_pct: float              # (chosen_ppu - global_ppu) / global_ppu * 100
+    visible: int  # plan-visible side picked from (a, b)
+    hidden: int  # the other side
+    chosen_ppu: float  # width_px / visible
+    delta_pct: float  # (chosen_ppu - global_ppu) / global_ppu * 100
     confidence: Literal["high", "medium", "low"]
 
 
@@ -55,8 +55,11 @@ def calibrate(
     """Run the histogram-of-candidates calibration over rect-only pairs."""
     if len(rect_pairs) < config.min_pairs_for_calibration:
         return CalibrationResult(
-            ppu=None, n_pairs=len(rect_pairs), n_in_band=0,
-            band_lo=None, band_hi=None,
+            ppu=None,
+            n_pairs=len(rect_pairs),
+            n_in_band=0,
+            band_lo=None,
+            band_hi=None,
         )
 
     cands: list[float] = []
@@ -69,8 +72,11 @@ def calibrate(
 
     if len(cands) < config.min_pairs_for_calibration * 2:
         return CalibrationResult(
-            ppu=None, n_pairs=len(rect_pairs), n_in_band=0,
-            band_lo=None, band_hi=None,
+            ppu=None,
+            n_pairs=len(rect_pairs),
+            n_in_band=0,
+            band_lo=None,
+            band_hi=None,
         )
 
     arr = np.array(cands)
@@ -82,8 +88,11 @@ def calibrate(
     in_band = arr[(arr >= band_lo) & (arr <= band_hi)]
     if len(in_band) == 0:
         return CalibrationResult(
-            ppu=None, n_pairs=len(rect_pairs), n_in_band=0,
-            band_lo=None, band_hi=None,
+            ppu=None,
+            n_pairs=len(rect_pairs),
+            n_in_band=0,
+            band_lo=None,
+            band_hi=None,
         )
     ppu = float(np.median(in_band))
     return CalibrationResult(

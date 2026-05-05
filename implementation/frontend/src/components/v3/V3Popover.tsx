@@ -14,9 +14,6 @@ interface Props {
   segment: V3Segment;
   /** Anchor in stage-local coords (segment marker center). */
   anchor: { x: number; y: number };
-  /** Height of the stage element so we can place above-or-below the marker
-   *  based on available room without measuring the popover itself. */
-  stageHeight: number;
   onClose: () => void;
 }
 
@@ -27,7 +24,7 @@ type Placement = "above" | "below";
 // happen if we tried to read the actual popover rect during layout.
 const POPOVER_HEIGHT_ESTIMATE = 520;
 
-export function V3Popover({ segment, anchor, stageHeight, onClose }: Props) {
+export function V3Popover({ segment, anchor, onClose }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -36,13 +33,11 @@ export function V3Popover({ segment, anchor, stageHeight, onClose }: Props) {
 
   // Derive placement from the anchor's vertical position vs the popover's
   // expected height. Pure computation — no setState during layout, so no
-  // infinite-loop risk regardless of the layout settling cycle.
+  // infinite-loop risk regardless of the layout settling cycle. If the
+  // anchor sits high enough on the page that "above" would clip, drop
+  // the popover below; otherwise place it above the marker.
   const placement: Placement =
-    anchor.y < POPOVER_HEIGHT_ESTIMATE + 16
-      ? "below"
-      : stageHeight && anchor.y > stageHeight - 60
-        ? "above"
-        : "above";
+    anchor.y < POPOVER_HEIGHT_ESTIMATE + 16 ? "below" : "above";
 
   return (
     <div

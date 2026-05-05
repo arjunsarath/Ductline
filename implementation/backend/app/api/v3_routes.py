@@ -18,7 +18,9 @@ Three endpoints:
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import os
 from dataclasses import asdict
 from io import BytesIO
 from pathlib import Path
@@ -49,10 +51,8 @@ router = APIRouter()
 # Bare host-side dev (uvicorn outside docker) doesn't, so honour an
 # env override and fall back to the in-tree sample-HVAC folder so the
 # upload screen has something to offer.
-import os as _os
-
 _SAMPLES_DIR = Path(
-    _os.environ.get("V3_SAMPLES_DIR")
+    os.environ.get("V3_SAMPLES_DIR")
     or (
         "/drawings"
         if Path("/drawings").exists()
@@ -60,6 +60,11 @@ _SAMPLES_DIR = Path(
     )
 )
 _SAMPLE_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+
+# Target for the histogram subsampler in ``_extract_swatches``: aim for
+# ~1 megapixel of sampled pixels regardless of source size, so a 100 MP
+# A1-at-600 DPI render still gives a fast and representative palette.
+_SWATCH_SUBSAMPLE_TARGET_PX = 1024 * 1024
 
 
 # ── Request shapes ──────────────────────────────────────────────────────────
@@ -154,7 +159,8 @@ def _render_full_page(
         if ctx.ocr_cache is not None:
             target_dpi = src.smart_dpi_for_rect(
                 rect_pt=(0.0, 0.0, src.page_size_pt[0], src.page_size_pt[1])
-                if src.page_size_pt else (0.0, 0.0, 1.0, 1.0),
+                if src.page_size_pt
+                else (0.0, 0.0, 1.0, 1.0),
                 ocr_cache=ctx.ocr_cache,
                 target_text_px=target_text_height_px,
             )
@@ -177,7 +183,9 @@ def _render_full_page(
 
 
 def _extract_swatches(
-    rendered: Image.Image, *, max_swatches: int = 12,
+    rendered: Image.Image,
+    *,
+    max_swatches: int = 12,
 ) -> list[Swatch]:
     """Histogram-quantize the page to its dominant saturated colors.
 
@@ -190,7 +198,7 @@ def _extract_swatches(
     rgb = np.asarray(rendered.convert("RGB"), dtype=np.uint8)
     h, w, _ = rgb.shape
     # Subsample for speed — at 600 DPI a full A1 page is 100M pixels.
-    step = max(1, int(np.sqrt(h * w / (1024 * 1024))))
+    step = max(1, int(np.sqrt(h * w / _SWATCH_SUBSAMPLE_TARGET_PX)))
     sub = rgb[::step, ::step]
     sh, sw = sub.shape[:2]
     px = sub.reshape(-1, 3)
@@ -213,7 +221,7 @@ def _extract_swatches(
 
     # 6-bit-per-channel quantization → 64^3 cells. Use a single int key
     # so np.unique is fast even on millions of pixels.
-    q = (px.astype(np.uint32) >> 2)
+    q = px.astype(np.uint32) >> 2
     keys = (q[:, 0] << 12) | (q[:, 1] << 6) | q[:, 2]
     unique_keys, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
     order = np.argsort(-counts)[:max_swatches]
@@ -234,11 +242,19 @@ def _extract_swatches(
         r, g, b = (int(c) for c in bin_px[rep])
         hh, ss, vv = (int(c) for c in bin_hsv[rep])
         sx, sy = (int(c) for c in bin_coords[rep])
-        swatches.append(Swatch(
-            r=r, g=g, b=b, count=int(counts[idx]),
-            h=hh, s=ss, v=vv,
-            sample_x=sx, sample_y=sy,
-        ))
+        swatches.append(
+            Swatch(
+                r=r,
+                g=g,
+                b=b,
+                count=int(counts[idx]),
+                h=hh,
+                s=ss,
+                v=vv,
+                sample_x=sx,
+                sample_y=sy,
+            )
+        )
     return swatches
 
 
@@ -261,8 +277,10 @@ async def v3_render(
         ocr = build_ocr()
     ctx = _build_renderer_context(file_bytes, file.filename or "uploaded", ocr)
     target_dpi, png_bytes, w, h, pil = _render_full_page(
-        ctx, target_text_height_px=target_text_height_px,
-        min_dpi=min_dpi, max_dpi=max_dpi,
+        ctx,
+        target_text_height_px=target_text_height_px,
+        min_dpi=min_dpi,
+        max_dpi=max_dpi,
     )
     smallest = ctx.ocr_cache.smallest_text_height_px_p5 if ctx.ocr_cache else None
     rotation = int(ctx.source.rotation_applied) if ctx.source else 0
@@ -306,15 +324,17 @@ def _picks_to_config(picks_payload: list[PickPayload]) -> V3PipelineConfig:
                 lo=(p.second.h_lo, p.second.s_lo, p.second.v_lo),
                 hi=(p.second.h_hi, p.second.s_hi, p.second.v_hi),
             )
-        picks.append(ColorPick(
-            label=p.label,
-            primary_range=primary,
-            second_range=secondary,
-            pattern=p.pattern,
-            kind=p.kind,
-            display_color_bgr=tuple(p.display_color_bgr),
-            system_id=p.system_id or f"sys_{i:02d}",
-        ))
+        picks.append(
+            ColorPick(
+                label=p.label,
+                primary_range=primary,
+                second_range=secondary,
+                pattern=p.pattern,
+                kind=p.kind,
+                display_color_bgr=tuple(p.display_color_bgr),
+                system_id=p.system_id or f"sys_{i:02d}",
+            )
+        )
     return V3PipelineConfig(picks=picks)
 
 
@@ -357,7 +377,6 @@ async def v3_detect(
     ocr: Annotated[OCRExtractor, Depends(build_ocr)] = None,  # type: ignore[assignment]
 ) -> DetectResponse:
     """Run V3 pipeline: source bytes + picks → result + overlay PNG."""
-    import json
     file_bytes = await file.read()
     if ocr is None:
         ocr = build_ocr()
@@ -386,7 +405,7 @@ async def v3_detect(
     overlay_b64: str | None = None
     page_b64: str | None = None
     if artifacts is not None:
-        overlay_rgba = render_overlay(artifacts.rendered_bgr, artifacts.system_masks, result)
+        overlay_rgba = render_overlay(artifacts.rendered_bgr, artifacts.system_masks)
         ok, png = cv2.imencode(".png", overlay_rgba)
         if ok:
             overlay_b64 = base64.b64encode(png.tobytes()).decode("ascii")
@@ -422,10 +441,7 @@ def list_samples() -> list[dict]:
 @router.get("/samples/{name}")
 def get_sample(name: str) -> FileResponse:
     candidate = (_SAMPLES_DIR / name).resolve()
-    if (
-        _SAMPLES_DIR.resolve() not in candidate.parents
-        and candidate != _SAMPLES_DIR.resolve()
-    ):
+    if _SAMPLES_DIR.resolve() not in candidate.parents and candidate != _SAMPLES_DIR.resolve():
         raise HTTPException(status_code=400, detail="invalid sample name")
     if not candidate.exists() or candidate.suffix.lower() not in _SAMPLE_EXTENSIONS:
         raise HTTPException(status_code=404, detail="sample not found")

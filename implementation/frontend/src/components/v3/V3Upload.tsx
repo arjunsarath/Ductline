@@ -20,6 +20,7 @@ export function V3Upload({ onFile, errorMessage }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [samples, setSamples] = useState<V3SampleEntry[] | null>(null);
+  const [sampleError, setSampleError] = useState<string | null>(null);
 
   // Show samples on the landing page so first-time users have something
   // to click. Loads on mount; if the backend has no /drawings volume the
@@ -105,6 +106,11 @@ export function V3Upload({ onFile, errorMessage }: Props) {
         {samples !== null && samples.length > 0 && (
           <div className="samples-panel">
             <h3 className="samples-title">Or try a sample</h3>
+            {sampleError && (
+              <p className="upload-error" role="alert">
+                {sampleError}
+              </p>
+            )}
             <ul className="samples-list">
               {samples.map((s) => (
                 <li key={s.name}>
@@ -112,11 +118,13 @@ export function V3Upload({ onFile, errorMessage }: Props) {
                     type="button"
                     className="samples-row"
                     onClick={async () => {
+                      setSampleError(null);
                       try {
                         const file = await fetchSample(s.name);
                         onFile(file);
-                      } catch {
-                        /* swallow — keep dialog open */
+                      } catch (err) {
+                        const message = err instanceof Error ? err.message : "fetch failed";
+                        setSampleError(`${s.name}: ${message}`);
                       }
                     }}
                   >

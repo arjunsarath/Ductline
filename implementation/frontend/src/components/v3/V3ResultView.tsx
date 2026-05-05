@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { clamp } from "../canvasShared";
 import { type Viewport, INITIAL_VIEWPORT, SCALE_MAX, SCALE_MIN } from "../viewport";
 import type { V3DetectResponse, V3Segment } from "../../types/v3";
 import { V3CanvasViewer } from "./V3CanvasViewer";
@@ -358,8 +359,4 @@ function stepSelection(
   if (current === null) return delta > 0 ? ids[0] : ids[ids.length - 1];
   const index = ids.indexOf(current);
   return ids[(index + delta + ids.length) % ids.length];
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
 }
