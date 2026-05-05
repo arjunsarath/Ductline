@@ -43,3 +43,6 @@ yarn-error.log*
 coverage/
 .coverage
 htmlcov/
+
+# Claude Code agent local state (per-project session memory + caches)
+.claude/
