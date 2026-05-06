@@ -1,8 +1,20 @@
 # Ductline — Implementation
 
-> **What this is:** the running V3 implementation. Backend (FastAPI) + frontend (Vite/React) wired through `POST /v3/render` and `POST /v3/detect`.
-> **Design:** [`../SOLUTION-DESIGN-V3.md`](../SOLUTION-DESIGN-V3.md) is the source of truth. Everything in this folder is an artefact of that design.
-> **History:** the `app/pipeline/` modules outside `v3/` are V1 stages (reused for ingest + probe-OCR + raster orientation; their VLM-driven `detect.py` and `review.py` are no longer on the live path).
+> **What this is:** the running implementation. Two pipelines are live:
+> - **V4** (active for outline-based drawings) — `POST /v4/sessions`, design at
+>   [`../SOLUTION-DESIGN-V4.md`](../SOLUTION-DESIGN-V4.md). Adds duct run-length
+>   (ft), CFM trace, and per-segment pressure + SMACNA class.
+> - **V3** (colour-driven fallback) — `POST /v3/render` and `POST /v3/detect`,
+>   design at [`../SOLUTION-DESIGN-V3.md`](../SOLUTION-DESIGN-V3.md) (superseded
+>   header but retained as fallback).
+>
+> The frontend exposes a V3 / V4 tab toggle on the upload page. V3 is the
+> default to avoid disturbing the existing colour-pick flow.
+> **History:** the `app/pipeline/` modules outside `v3/` and `v4/` are V1 stages
+> (reused for ingest + probe-OCR + raster orientation; their VLM-driven
+> `detect.py` and `review.py` are no longer on the live path). Pre-V2 baseline
+> screenshots have been archived under `archive/v1-v3/` — see
+> [`archive/v1-v3/MANIFEST.md`](./archive/v1-v3/MANIFEST.md).
 
 ---
 
@@ -126,6 +138,41 @@ cd implementation/frontend
 npx tsc -b --pretty
 # → exit 0
 ```
+
+### Running V4
+
+V4 is the outline-based pipeline (no colour pick). It targets `testset2.pdf`
+and any single-page PDF that follows the conventions A1–A15 documented in
+[`../SOLUTION-DESIGN-V4.md`](../SOLUTION-DESIGN-V4.md) §2 and surfaced in the
+frontend's V4 upload page banner.
+
+```bash
+# CLI (acceptance run on testset2.pdf)
+cd implementation/backend
+.venv/bin/python scripts/run_v4.py ../drawings/testset2.pdf
+
+# HTTP (multipart upload, single-page PDF)
+curl -X POST http://localhost:8000/v4/sessions \
+     -F "file=@../drawings/testset2.pdf"
+```
+
+The frontend's V4 tab calls the same endpoint and renders the annotated
+overlay, segment list (length_ft, dimension, CFM at endpoints, velocity,
+pressure at endpoints, SMACNA class), terminal list (CFM, type letter), and a
+Calculation Settings drawer where operational variables (air density, friction
+factor, fitting K-values, flex equivalent length, threshold table) can be
+edited; changes recompute live.
+
+### V4 MVP assumptions (A1–A15)
+
+V4 ships with 15 explicit drawing-convention assumptions locked in
+`SOLUTION-DESIGN-V4.md` §2 and surfaced on the V4 upload page. The product
+README has the full list verbatim — see [`../README.md` §2.4](../README.md).
+The short version: dimension labels live inside the duct fill; rectangular
+labels are `WxH`; terminals are circles with a horizontal divider; segments are
+bounded by perpendicular cross-cut bars; transitions / elbows / tees /
+equipment boxes are connectors, not segments; drawings are to scale; grey
+architectural fill is stripped; all CFM is read from terminal symbols.
 
 ---
 
@@ -266,7 +313,28 @@ The picker accepts dark picks (V<60) by detecting the click target is a dark lin
 
 ---
 
-## 6. Known limitations (V3, current)
+## 6. Known limitations
+
+### 6.1 V4 (outline-based, current)
+
+1. **Rectangular dimension labels on dense angled ducts** can be missed by
+   OCR; the segment then falls back to a round-pixel-width estimate. Observed
+   on the `22"x14"` duct in `testset2.pdf`.
+2. **Sparse terminal-to-segment incidence** on `testset2.pdf` — ~178
+   terminals are detected but few attach to segments due to limited CV recall
+   on cross-cut bars; CFM accumulation on those segments is suppressed. CV
+   recall on cross-cut bars is the next iteration target.
+3. **Single page only.** The runner enforces single-page input; multi-page
+   PDFs require the user to pick a page before upload.
+4. **CFM source is terminal symbols only.** Plan-note prose CFM (e.g.,
+   `2,800 CFM up to roof`) is not parsed (A14).
+5. **Equipment nodes** (VAV / FPB / AHU) are treated as generic connectors;
+   no equipment-type semantics.
+6. **Cross-sheet continuations** (`see M3.0`) are dead-ends in V4.
+7. See [`../SOLUTION-DESIGN-V4.md`](../SOLUTION-DESIGN-V4.md) §10 for the full
+   deferred list.
+
+### 6.2 V3 (colour-driven fallback)
 
 1. **Parallel-wall ducts (drawings 04, 05) — bogus widths.** Centerline mode attributes labels to duct centerlines correctly but the pixel width measurement is the dilation thickness, not the duct gap. `dim_confidence: high` from centerline mode is therefore not a real signal. Fix: OCR-anchored Pattern A — see roadmap in [`../README.md` §5.1](../README.md). Estimated 2–3 weeks.
 2. **Manual color pick.** Every drawing requires the user to identify each duct system's color (one click + optional pattern toggle per system). On drawings with 1–2 systems this is fast; on drawings with 6+ trades sharing a sheet it's tedious. Auto-detection roadmap is in [`../README.md` §5.2 + §5.3](../README.md).

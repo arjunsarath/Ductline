@@ -5,8 +5,13 @@
 >
 > This document is product-level: what it does, why each version exists, what works today, and the production roadmap.
 
-> **Status:** V3 in iterative validation. V1 + V2 archived as design + retrospective. Roadmap and standards-based timeline below.
-> **Repo layout:** `/PRD.md` · `/SOLUTION-DESIGN.md` (V1) · `/SOLUTION-DESIGN-V2.md` · `/SOLUTION-DESIGN-V3.md` · `/adr/` · `/implementation/` · `/sample-HVAC/` (5 benchmark drawings)
+> **Status:** V4 active for outline-based drawings (`testset2.pdf`). V3 retained as
+> the colour-driven fallback path. V1 + V2 archived as design + retrospective.
+> Roadmap and standards-based timeline below.
+> **Repo layout:** `/PRD.md` · `/SOLUTION-DESIGN.md` (V1) · `/SOLUTION-DESIGN-V2.md` ·
+> `/SOLUTION-DESIGN-V3.md` (superseded) · `/SOLUTION-DESIGN-V4.md` (active) ·
+> `/adr/` · `/implementation/` · `/sample-HVAC/` (5 benchmark drawings) ·
+> `/implementation/drawings/testset2.pdf` (V4 acceptance set)
 > **Author:** Arjun Sarath
 
 ---
@@ -71,6 +76,95 @@ This trades the failure mode of "VLM is unreliable" for the constraint of "user 
 | 05 — `federal-attachment` | Parallel-wall dark ducts, dense | 58 segments via centerline mode | ✗ — widths bogus |
 
 Drawings 01–03 are production-quality. Drawings 04–05 attribute dim labels correctly but the pixel-width measurement is unreliable because the pipeline doesn't yet handle parallel-wall ducts with proper geometric width extraction (Pattern A — see §5).
+
+### 2.4 V4 — outline-based pipeline with length, CFM trace, and pressure (active)
+
+> Full design: [`SOLUTION-DESIGN-V4.md`](./SOLUTION-DESIGN-V4.md). ADRs:
+> [`adr/0014-v4-scope-and-assumptions.md`](./adr/0014-v4-scope-and-assumptions.md),
+> [`adr/0015-outline-based-duct-detection.md`](./adr/0015-outline-based-duct-detection.md),
+> [`adr/0016-pressure-class-via-smacna.md`](./adr/0016-pressure-class-via-smacna.md).
+
+V4 is the active path for the new acceptance drawing (`implementation/drawings/testset2.pdf`)
+and addresses the two post-submission feedback items: validate on `testset2.pdf`,
+and detect + display **duct run lengths** (in feet). It also adds **CFM trace**
+through the duct network (terminal symbols → segment endpoints) and a per-segment
+**pressure value + SMACNA class** (Low ≤ 2" w.c., Medium 2–3", High > 3", with a
+secondary velocity check). All operational variables (air density, friction
+factor, fitting K-values, flex-duct equivalent length, threshold table) are
+user-editable in a Calculation Settings drawer.
+
+V4 swaps V3's HSV-colour mask for outline-based duct detection (see ADR-0015) and
+introduces a duct-network graph: nodes are connectors / terminals / open ends,
+edges are segments bounded by perpendicular cross-cut bars. The frontend exposes
+a **V3 / V4 tab toggle** on the upload page; V3 stays the default to avoid
+disturbing the colour-driven flow.
+
+**How to run V4 (CLI):**
+
+```bash
+cd implementation/backend
+.venv/bin/python scripts/run_v4.py ../drawings/testset2.pdf
+```
+
+**How to run V4 (HTTP):**
+
+```
+POST /api/v4/sessions   ← multipart upload, single-page PDF
+```
+
+The session response carries the segment list (length_ft, dimension, CFM at
+endpoints, velocity, pressure at endpoints, pressure class), the terminal list
+(CFM, type letter), and the rendered annotated overlay. The frontend's V4 tab
+consumes the same payload.
+
+**MVP assumptions (A1–A15):** V4 ships with 15 explicit drawing-convention
+assumptions locked in `SOLUTION-DESIGN-V4.md` §2 and surfaced on the V4 upload
+page as an assumptions banner. The full list:
+
+1. **A1.** Dimension labels live inside the duct fill (one label per segment).
+2. **A2.** Only one numeric token lives inside a duct interior.
+3. **A3.** Rectangular labels are always `WxH` (width × height).
+4. **A4.** No insulation/double-line wrap pattern; if encountered, the inner
+   bbox is the duct.
+5. **A5.** Air terminal = circle with horizontal divider; top half = type
+   letter (ignored in MVP), bottom half = numeric CFM.
+6. **A6.** A segment is bounded by two perpendicular cross-cut bars at its
+   ends. Transitions, elbows, tees, Y-branches, and equipment boxes are
+   connectors, not segments.
+7. **A7.** Solid-touching ducts are connected. Dashed rendering = duct passes
+   underneath; logically a single segment, displayed with alpha overlay.
+8. **A8.** Drawing is to scale. Label text is axis-aligned (0° or 90°).
+9. **A9.** Unlabeled segments are sized by direct pixel measurement × scale,
+   not by inheritance.
+10. **A10.** A single segment can host N air terminals along its length.
+11. **A11.** Connector materials (rigid vs flex) vary; for MVP both are
+    treated as a generic connector with a default equivalent length the user
+    can override.
+12. **A12.** Grey-shaded regions are non-HVAC architectural fill and are
+    stripped during preprocessing.
+13. **A13.** Open-ended ducts have no airflow unless tagged with a terminal
+    symbol or a user-entered CFM.
+14. **A14.** All CFM values for MVP are read from terminal symbols (not from
+    plan-note prose).
+15. **A15.** Single-page PDF only. The user picks the page on upload if the
+    source has more than one.
+
+**Known V4 limitations:**
+
+- Rectangular dimension labels on dense angled ducts may be missed by OCR and
+  silently fall back to a round-pixel-measured estimate (observed on the
+  `22"x14"` duct in `testset2.pdf`).
+- Terminal-to-segment incidence on `testset2.pdf` is sparse — ~178 terminals
+  are detected but few attach to segments due to limited CV recall on
+  cross-cut bars; this suppresses CFM accumulation on those segments.
+- Multi-page PDFs require manual page selection; the runner enforces
+  single-page input.
+- CFM is read only from terminal symbols; plan-note prose CFM (e.g.,
+  `2,800 CFM up to roof`) is not parsed.
+- Equipment nodes (VAV/FPB/AHU) are treated as generic connectors; no
+  equipment-type semantics.
+- Cross-sheet continuations (`see M3.0`) are dead-ends in V4.
+- See `SOLUTION-DESIGN-V4.md` §10 for the full deferred list.
 
 ---
 

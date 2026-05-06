@@ -2,6 +2,10 @@
  * App shell — V3 flow (SOLUTION-DESIGN-V3 §4):
  *   Upload → Picker → Result
  *
+ * V4 sits behind a tab toggle (rendered on the V3 upload page). The two
+ * modes are independent flows — V3 stays the default to avoid disturbing
+ * existing users; switching to V4 swaps in a self-contained `<V4View />`.
+ *
  * The legacy V1/V2 pipeline now lives behind /api/agent on the backend
  * and is not surfaced in the UI by default — it's parked until we have
  * a sufficiently-capable on-prem VLM.
@@ -12,11 +16,14 @@ import { detect, renderPage } from "./api/v3Client";
 import { V3PickerView } from "./components/v3/V3PickerView";
 import { V3ResultView } from "./components/v3/V3ResultView";
 import { V3Upload } from "./components/v3/V3Upload";
+import { V4View } from "./components/v4/V4View";
 import type {
   PickPayload,
   V3DetectResponse,
   V3RenderResponse,
 } from "./types/v3";
+
+type Mode = "v3" | "v4";
 
 type View =
   | { kind: "upload"; errorMessage?: string }
@@ -35,6 +42,7 @@ type View =
     };
 
 export default function App() {
+  const [mode, setMode] = useState<Mode>("v4");
   const [view, setView] = useState<View>({ kind: "upload" });
 
   const handleFile = useCallback(async (file: File) => {
@@ -74,9 +82,22 @@ export default function App() {
     setView({ kind: "upload" });
   }, []);
 
+  if (mode === "v4") {
+    return (
+      <V4View
+        renderUploadHeader={() => <ModeToggle mode={mode} onChange={setMode} />}
+      />
+    );
+  }
+
   switch (view.kind) {
     case "upload":
-      return <V3Upload onFile={handleFile} errorMessage={view.errorMessage} />;
+      return (
+        <>
+          <ModeToggle mode={mode} onChange={setMode} />
+          <V3Upload onFile={handleFile} errorMessage={view.errorMessage} />
+        </>
+      );
     case "rendering":
       return (
         <main className="processing-view">
@@ -110,4 +131,41 @@ export default function App() {
         />
       );
   }
+}
+
+function ModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: Mode;
+  onChange: (next: Mode) => void;
+}) {
+  return (
+    <div
+      className="app-mode-toggle"
+      role="tablist"
+      aria-label="Pipeline version"
+      style={{ position: "fixed", top: 14, right: 20, zIndex: 60 }}
+    >
+      <span className="app-mode-toggle__label">Pipeline:</span>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "v4"}
+        className={mode === "v4" ? "is-active" : ""}
+        onClick={() => onChange("v4")}
+      >
+        V4 (active)
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "v3"}
+        className={mode === "v3" ? "is-active" : ""}
+        onClick={() => onChange("v3")}
+      >
+        V3 (fallback)
+      </button>
+    </div>
+  );
 }

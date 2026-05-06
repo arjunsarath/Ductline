@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as agent_router
+from app.api.sessions import router as v4_router
 from app.api.v3_routes import router as v3_router
 
 app = FastAPI(title="HVAC Duct Detection", version="0.3.0")
@@ -35,6 +36,7 @@ app.add_middleware(
 # are bare (``/v3``, ``/agent``). Frontend calls e.g. ``/api/v3/render``
 # → proxy strips ``/api`` → backend serves ``/v3/render``.
 app.include_router(v3_router, prefix="/v3", tags=["v3"])
+app.include_router(v4_router, prefix="/v4", tags=["v4"])
 app.include_router(agent_router, prefix="/agent", tags=["agent (parked)"])
 
 

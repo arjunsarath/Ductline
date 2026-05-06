@@ -141,3 +141,208 @@ class DrawingResult(_Frozen):
     # overlay sits in rotated space.
     rotation_applied: Literal[0, 90, 180, 270] = 0
     errors: list[str] = Field(default_factory=list)  # Per-stage degradations (§9)
+
+
+# ---------------------------------------------------------------------------
+# V4 — length, CFM trace, and pressure (SOLUTION-DESIGN-V4 §4–§6).
+# ---------------------------------------------------------------------------
+
+SmacnaClass = Literal["Low", "Medium", "High"]
+ScaleSource = Literal["title_block", "manual"]
+
+
+class SmacnaThresholds(_Frozen):
+    """Per-class pressure ceilings in inches of water column (SOLUTION-DESIGN-V4 §6)."""
+
+    low_max_in_wc: float = 2.0
+    medium_max_in_wc: float = 3.0
+
+
+class VelocityThresholds(_Frozen):
+    """Secondary velocity check in feet per minute (SOLUTION-DESIGN-V4 §6)."""
+
+    low_max_fpm: float = 2000.0
+    medium_max_fpm: float = 2500.0
+
+
+class OperationalVars(_Frozen):
+    """User-editable physics inputs for pressure calculation.
+
+    Defaults track ASHRAE/SMACNA convention for galvanized-steel rigid duct at
+    standard air conditions; the UI exposes all of these for override.
+    """
+
+    air_density_lb_ft3: float = 0.075
+    friction_factor: float = 0.02
+    fitting_k_table: dict[str, float] = Field(
+        default_factory=lambda: {
+            "elbow": 0.3,
+            "tee": 0.5,
+            "y_branch": 0.4,
+            "transition": 0.15,
+            "equipment": 0.0,
+            "terminal": 0.2,
+        }
+    )
+    # Atmospheric reference at the open / equipment end (in. w.c.). Defaults to
+    # 0 — the entire network is reported as a drop relative to this datum.
+    source_pressure_in_wc: float = 0.0
+    flex_equiv_length_ft: float = 5.0
+    smacna_thresholds_in_wc: SmacnaThresholds = Field(default_factory=SmacnaThresholds)
+    velocity_thresholds_fpm: VelocityThresholds = Field(default_factory=VelocityThresholds)
+
+
+class ScaleInfo(_Frozen):
+    """Drawing scale used to convert pixels to feet (SOLUTION-DESIGN-V4 §5)."""
+
+    paper_inches_per_foot: float
+    source: ScaleSource
+    confidence: float
+
+
+class CfmRange(_Frozen):
+    """CFM at each end of a segment after flow tracing (SOLUTION-DESIGN-V4 §6)."""
+
+    start: float
+    end: float
+
+
+class PressureResult(_Frozen):
+    """Per-segment pressure value pair plus SMACNA classification."""
+
+    start_in_wc: float
+    end_in_wc: float
+    smacna_class: SmacnaClass
+    velocity_fpm: float
+
+
+class TerminalRef(_Frozen):
+    """Lightweight pointer attaching a terminal to its host segment."""
+
+    terminal_id: str
+    distance_along_segment_ft: float
+    cfm: float
+
+
+class V4Terminal(_Frozen):
+    id: str
+    center: tuple[float, float]
+    radius: float
+    type_letter: str | None
+    cfm: float | None
+
+
+class V4Segment(_Frozen):
+    id: str
+    dimension: str
+    length_ft: float
+    cfm_range: CfmRange
+    pressure: PressureResult
+    polygon: list[tuple[float, float]]
+    terminals_on_segment: list[TerminalRef] = Field(default_factory=list)
+
+
+class PageDims(_Frozen):
+    """Rasterized-page dimensions in pixels at the runner-chosen DPI.
+
+    Frontend overlay viewBox uses these so polygon/terminal coordinates
+    (emitted in raster pixel space) align with the rendered PDF page even
+    when the data bbox doesn't extend to the page edges.
+    """
+
+    width_px: int
+    height_px: int
+    dpi: int
+    # PDF page rotation (0/90/180/270) honoured during rasterisation; the
+    # frontend must apply the same rotation when rendering the PDF underneath
+    # so its display orientation matches the overlay's pixel space.
+    rotation: int = 0
+
+
+DropReason = Literal["shape_unknown", "diameter_out_of_range", "no_label"]
+RectDropReason = Literal[
+    "oversized", "non_duct_text", "low_aspect_ratio", "interior_not_empty",
+    "not_rectangle", "interior_no_ink", "too_square", "interior_too_full",
+]
+
+
+class DebugRectangle(_Frozen):
+    """A rectangle contour plus the filter outcome that decided its fate."""
+
+    corners: list[tuple[int, int]]
+    kept: bool
+    drop_reason: RectDropReason | None = None
+
+
+class DebugDimension(_Frozen):
+    """One OCR match whose text parses as a duct cross-section dimension."""
+
+    text: str
+    kind: Literal["round", "rectangular"]
+    bbox: tuple[int, int, int, int]  # (x, y, w, h) in raster pixel space
+
+
+class DebugOcrMatch(_Frozen):
+    """One raw OCR token, unfiltered."""
+
+    text: str
+    bbox: tuple[int, int, int, int]  # (x, y, w, h) in raster pixel space
+    confidence: float
+    # The exact image patch sent to the OCR engine, base64 PNG data URL.
+    # Used by the click-to-inspect debug overlay so the operator can see
+    # what the model actually saw.
+    crop_data_url: str | None = None
+    # Which engine produced the text — ``tesseract`` (fast path),
+    # ``vlm`` (escalated when Tesseract's confidence < 0.90), or ``empty``
+    # (no text detected, no VLM call needed).
+    source: Literal["tesseract", "vlm", "empty"] | None = None
+    # Four corners of the contour's minimum-area rotated bbox. Lets the
+    # overlay draw the bbox tilted at the rectangle's actual angle instead
+    # of the axis-aligned bbox, which over-shoots on rotated ducts.
+    oriented_corners: list[tuple[int, int]] | None = None
+
+
+class DebugPolygon(_Frozen):
+    """Every polygon `detect_duct_polygons` returned, tagged with its outcome.
+
+    Emitted only when the runner is invoked with debug=True so the operator can
+    see what was kept versus filtered and why. Coordinates are raster pixels at
+    the runner-chosen DPI — same space as `V4Segment.polygon` and `PageDims`.
+    """
+
+    id: str
+    bbox: tuple[int, int, int, int]
+    polygon: list[tuple[int, int]]
+    shape_hint: Literal["round", "rectangular", "unknown"]
+    est_width_px: float
+    est_diameter_in: float | None
+    kept: bool
+    drop_reason: DropReason | None
+
+
+class V4Debug(_Frozen):
+    polygons: list[DebugPolygon]
+
+
+class V4Result(_Frozen):
+    segments: list[V4Segment]
+    terminals: list[V4Terminal]
+    scale: ScaleInfo
+    op_vars: OperationalVars
+    page_dims: PageDims
+    warnings: list[str] = Field(default_factory=list)
+    debug: V4Debug | None = None
+    # Step-debug payload: when the runner is short-circuited after a stage
+    # (e.g. grey_removal), this holds the intermediate raster as a base64
+    # PNG data URL so the frontend can display the partial output.
+    stage_image_data_url: str | None = None
+    stage_stopped_after: str | None = None
+    # Every rectangle contour found on the cleaned raster, tagged with the
+    # filter outcome (kept or which filter dropped it). Operator-debug payload.
+    debug_rectangles: list["DebugRectangle"] = Field(default_factory=list)
+    # OCR matches whose text parses as a duct cross-section dimension.
+    # Highlighted only for troubleshooting; not part of the live workflow.
+    debug_dimensions: list["DebugDimension"] = Field(default_factory=list)
+    # Every raw OCR token returned by the engine on the cleaned page,
+    # un-filtered. Operator-debug payload — clickable to read the raw text.
+    debug_ocr: list["DebugOcrMatch"] = Field(default_factory=list)

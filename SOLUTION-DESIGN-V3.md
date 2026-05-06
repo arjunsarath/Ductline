@@ -1,5 +1,10 @@
 # HVAC Duct Detection & Annotation — Solution Design V3 (Pivot)
 
+> **Status: Superseded by V4** (2026-05-06). V3 is retained as the colour-driven
+> fallback path; V4 (`SOLUTION-DESIGN-V4.md`) is the active outline-based
+> pipeline. See `adr/0011-v3-pivot-rationale.md` and
+> `adr/0014-v4-scope-and-assumptions.md`.
+
 > **Status:** Draft, build-in-progress. V3 is a deliberate scope pivot away
 > from V1/V2's general detection pipeline toward a narrower, deterministic
 > color-driven MVP grounded by a successful spike on `03-caddsultants-shop.pdf`.
