@@ -21,6 +21,7 @@ from app.ocr.base import OCRExtractor
 DropReason = Literal[
     "oversized", "non_duct_text", "low_aspect_ratio", "interior_not_empty",
     "not_rectangle", "interior_no_ink", "too_square", "interior_too_full",
+    "not_circle", "no_horizontal_divider", "no_three_digit",
 ]
 
 # A rectangle bigger than this fraction of the page is the page frame, the
@@ -49,6 +50,19 @@ DEFAULT_MAX_CORNER_COS = 0.25
 # approxPolyDP epsilon as a fraction of perimeter. 0.02 smooths small notches
 # enough to resolve a rasterized rectangle to 4 vertices.
 DEFAULT_EPSILON_FRAC = 0.02
+# Circularity threshold for ``filter_is_circle``. 4π·A/P² is 1.0 for a perfect
+# circle, ≈0.785 for a square, ≈0.6 for a triangle. 0.69 sits below the square
+# baseline and above the triangle floor — empirically picked on testset2 to
+# catch keynote bubbles, grid bubbles, and the bisected air-terminal symbols.
+DEFAULT_MIN_CIRCULARITY = 0.69
+# Air-terminal divider check (``filter_has_horizontal_divider``). Sample a
+# small band of rows centred on bbox-y, restricted to the inner [0.20w, 0.80w]
+# horizontal span (so the circle outline doesn't dominate). Keep when at least
+# one row's ink density crosses this fraction — a continuous divider scores
+# ~1.0; a number/letter centred at the same row scores well below 0.5.
+DEFAULT_MIN_DIVIDER_INK_PCT = 0.10
+_DIVIDER_BAND_HALF_HEIGHT_PX = 2
+_DIVIDER_INNER_X_FRAC = 0.2
 
 # Duct dimension grammar (A1 + A3): round `8"ø` and rectangular `22"x14"`.
 # Tolerant of OCR mojibake on `ø` (RapidOCR sometimes returns `0` or `o`).
@@ -198,6 +212,105 @@ def _is_rectangle(
         if abs(float(np.dot(ba, bc)) / denom) > max_corner_cos:
             return False
     return True
+
+
+def filter_is_circle(
+    tagged: list[TaggedRect],
+    *,
+    min_circularity: float = DEFAULT_MIN_CIRCULARITY,
+) -> list[TaggedRect]:
+    """Keep only contours whose shape is round.
+
+    Circularity is ``4π · area / perimeter²`` evaluated on the polygon corners
+    returned by ``find_all_rectangles``. The score is 1.0 for a perfect
+    circle, ≈0.785 for a square, ≈0.6 for an equilateral triangle. Anything
+    below ``min_circularity`` is dropped as ``not_circle``. Already-dropped
+    rects pass through untouched.
+    """
+    out: list[TaggedRect] = []
+    for rect in tagged:
+        if not rect.kept:
+            out.append(rect)
+            continue
+        score = _circularity(rect.corners)
+        if score is None or score < min_circularity:
+            out.append(TaggedRect(
+                corners=rect.corners, bbox=rect.bbox,
+                kept=False, drop_reason="not_circle",
+            ))
+            continue
+        out.append(rect)
+    return out
+
+
+def filter_has_horizontal_divider(
+    tagged: list[TaggedRect],
+    image: Image.Image,
+    *,
+    min_ink_pct: float = DEFAULT_MIN_DIVIDER_INK_PCT,
+) -> list[TaggedRect]:
+    """Keep contours whose bbox is bisected by a horizontal divider line.
+
+    Air-terminal symbols (A5) are circles split by a horizontal line: type
+    letter on top, CFM on bottom. We sample a ±2px band around the bbox
+    centre y, restricted to the inner horizontal span so the circle's
+    left/right outline doesn't show up as ink in every row. The maximum
+    per-row ink density across the band is compared to ``min_ink_pct``.
+    Already-dropped rects pass through untouched.
+    """
+    luma = np.asarray(image.convert("L"))
+    h_img, w_img = luma.shape
+    out: list[TaggedRect] = []
+    for rect in tagged:
+        if not rect.kept:
+            out.append(rect)
+            continue
+        score = _max_inner_row_ink(luma, rect.bbox, h_img, w_img)
+        if score is None or score < min_ink_pct:
+            out.append(TaggedRect(
+                corners=rect.corners, bbox=rect.bbox,
+                kept=False, drop_reason="no_horizontal_divider",
+            ))
+            continue
+        out.append(rect)
+    return out
+
+
+def _max_inner_row_ink(
+    luma: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    h_img: int,
+    w_img: int,
+) -> float | None:
+    """Densest ink-row fraction in the central band of ``bbox``."""
+    x, y, w, h = bbox
+    if w <= 0 or h <= 0:
+        return None
+    cy = y + h // 2
+    y0 = max(0, cy - _DIVIDER_BAND_HALF_HEIGHT_PX)
+    y1 = min(h_img, cy + _DIVIDER_BAND_HALF_HEIGHT_PX + 1)
+    x0 = max(0, int(x + w * _DIVIDER_INNER_X_FRAC))
+    x1 = min(w_img, int(x + w * (1.0 - _DIVIDER_INNER_X_FRAC)))
+    if y1 <= y0 or x1 <= x0:
+        return None
+    band = luma[y0:y1, x0:x1]
+    if band.size == 0:
+        return None
+    return float((band == 0).mean(axis=1).max())
+
+
+def _circularity(corners: list[tuple[int, int]]) -> float | None:
+    """Return 4π·A/P² for a polygon, or None when corners are degenerate."""
+    if len(corners) < 3:
+        return None
+    contour = np.array(corners, dtype=np.int32).reshape(-1, 1, 2)
+    perimeter = float(cv2.arcLength(contour, closed=True))
+    if perimeter <= 0:
+        return None
+    area = float(cv2.contourArea(contour))
+    if area <= 0:
+        return None
+    return (4.0 * float(np.pi) * area) / (perimeter * perimeter)
 
 
 def filter_min_ink(

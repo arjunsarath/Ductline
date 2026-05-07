@@ -217,6 +217,11 @@ async def create_v4_session(
     max_ink_pct: Annotated[float | None, Form()] = None,
     enable_squarish: Annotated[bool, Form()] = True,
     min_duct_aspect: Annotated[float | None, Form()] = None,
+    enable_circle: Annotated[bool, Form()] = False,
+    min_circularity: Annotated[float | None, Form()] = None,
+    enable_divider: Annotated[bool, Form()] = False,
+    min_divider_ink_pct: Annotated[float | None, Form()] = None,
+    enable_three_digit: Annotated[bool, Form()] = False,
 ) -> V4Result:
     """Run the V4 pipeline on an uploaded PDF and return the typed result.
 
@@ -270,6 +275,11 @@ async def create_v4_session(
             max_ink_pct=max_ink_pct,
             enable_squarish=enable_squarish,
             min_duct_aspect=min_duct_aspect,
+            enable_circle=enable_circle,
+            min_circularity=min_circularity,
+            enable_divider=enable_divider,
+            min_divider_ink_pct=min_divider_ink_pct,
+            enable_three_digit=enable_three_digit,
         )
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -308,6 +318,11 @@ async def create_v4_session_stream(
     max_ink_pct: Annotated[float | None, Form()] = None,
     enable_squarish: Annotated[bool, Form()] = True,
     min_duct_aspect: Annotated[float | None, Form()] = None,
+    enable_circle: Annotated[bool, Form()] = False,
+    min_circularity: Annotated[float | None, Form()] = None,
+    enable_divider: Annotated[bool, Form()] = False,
+    min_divider_ink_pct: Annotated[float | None, Form()] = None,
+    enable_three_digit: Annotated[bool, Form()] = False,
 ) -> StreamingResponse:
     """Run V4 and stream NDJSON progress events; final 'done' carries V4Result."""
     filename = file.filename or "uploaded.pdf"
@@ -335,6 +350,9 @@ async def create_v4_session_stream(
             rect_dpi, ocr_dpi,
             enable_min_ink, min_ink_pct, enable_max_ink, max_ink_pct,
             enable_squarish, min_duct_aspect,
+            enable_circle, min_circularity,
+            enable_divider, min_divider_ink_pct,
+            enable_three_digit,
         ),
         media_type="application/x-ndjson",
     )
@@ -381,6 +399,11 @@ async def _stream_v4(
     max_ink_pct: float | None = None,
     enable_squarish: bool = True,
     min_duct_aspect: float | None = None,
+    enable_circle: bool = False,
+    min_circularity: float | None = None,
+    enable_divider: bool = False,
+    min_divider_ink_pct: float | None = None,
+    enable_three_digit: bool = False,
 ) -> AsyncIterator[bytes]:
     """Bridge the sync runner's progress callback to an async NDJSON stream."""
     loop = asyncio.get_running_loop()
@@ -426,6 +449,11 @@ async def _stream_v4(
                 max_ink_pct=max_ink_pct,
                 enable_squarish=enable_squarish,
                 min_duct_aspect=min_duct_aspect,
+                enable_circle=enable_circle,
+                min_circularity=min_circularity,
+                enable_divider=enable_divider,
+                min_divider_ink_pct=min_divider_ink_pct,
+                enable_three_digit=enable_three_digit,
             )
             queue.put_nowait({
                 "stage": "result",

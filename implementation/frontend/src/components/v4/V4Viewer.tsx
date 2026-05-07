@@ -36,6 +36,8 @@ interface Props {
   fitHeight: number;
   selection: V4Selection;
   viewport: Viewport;
+  backgroundOpacity: number;
+  shadeByPressure: boolean;
   onViewportChange: (next: Viewport) => void;
   onSelect: (next: V4Selection) => void;
   onRotate: () => void;
@@ -51,6 +53,8 @@ export function V4Viewer({
   fitHeight,
   selection,
   viewport,
+  backgroundOpacity,
+  shadeByPressure,
   onViewportChange,
   onSelect,
   onRotate,
@@ -59,6 +63,23 @@ export function V4Viewer({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [selectedOcrIdx, setSelectedOcrIdx] = useState<number | null>(null);
+
+  // When a duct is selected, find its linked terminal in the matches list
+  // by bbox identity so the overlay can render both with highlight style.
+  const selectedMatch =
+    selectedOcrIdx !== null && result.debug_ocr
+      ? result.debug_ocr[selectedOcrIdx]
+      : null;
+  const linkedOcrIdx = (() => {
+    if (!selectedMatch?.adjacent_terminal_bbox || !result.debug_ocr) return null;
+    const [tx, ty, tw, th] = selectedMatch.adjacent_terminal_bbox;
+    const idx = result.debug_ocr.findIndex(
+      (m) =>
+        m.bbox[0] === tx && m.bbox[1] === ty
+        && m.bbox[2] === tw && m.bbox[3] === th,
+    );
+    return idx >= 0 ? idx : null;
+  })();
   const dragRef = useRef<{
     startX: number;
     startY: number;
@@ -139,29 +160,23 @@ export function V4Viewer({
     >
       <div className="viewer-content v4-viewer-content" style={{ transform }}>
         {fitWidth > 0 && fitHeight > 0 && (
-          <>
-            {result.stage_image_data_url ? (
-              <div
-                className="v4-overlay-wrap"
-                style={{ width: fitWidth, height: fitHeight, position: "relative" }}
-              >
+          <div
+            className="v4-overlay-wrap"
+            style={{
+              width: fitWidth, height: fitHeight, position: "relative",
+            }}
+          >
+            <div
+              className="v4-viewer__underlay"
+              style={{ opacity: backgroundOpacity }}
+            >
+              {result.stage_image_data_url ? (
                 <img
                   src={result.stage_image_data_url}
                   alt={`stage: ${result.stage_stopped_after ?? "intermediate"}`}
                   style={{ width: fitWidth, height: fitHeight, display: "block" }}
                 />
-                {result.debug_ocr && result.debug_ocr.length > 0 && (
-                  <V4OcrOverlay
-                    drawingW={drawingW}
-                    drawingH={drawingH}
-                    matches={result.debug_ocr}
-                    selectedIdx={selectedOcrIdx}
-                    onSelect={setSelectedOcrIdx}
-                  />
-                )}
-              </div>
-            ) : (
-              <>
+              ) : (
                 <V3PageCanvas
                   file={file}
                   rotation={result.page_dims.rotation}
@@ -170,32 +185,40 @@ export function V4Viewer({
                   fitHeight={fitHeight}
                   grayscale={false}
                 />
-                <div
-                  className="v4-overlay-wrap"
-                  style={{ width: fitWidth, height: fitHeight }}
-                >
-                  {result.debug && (
-                    <V4DebugOverlay
-                      drawingW={drawingW}
-                      drawingH={drawingH}
-                      polygons={result.debug.polygons}
-                      segments={result.segments}
-                      inverseScale={inverseScale}
-                    />
-                  )}
-                  <V4Overlay
-                    drawingW={drawingW}
-                    drawingH={drawingH}
-                    segments={result.segments}
-                    terminals={result.terminals}
-                    selection={selection}
-                    inverseScale={inverseScale}
-                    onSelect={onSelect}
-                  />
-                </div>
-              </>
+              )}
+            </div>
+            {result.debug && (
+              <V4DebugOverlay
+                drawingW={drawingW}
+                drawingH={drawingH}
+                polygons={result.debug.polygons}
+                segments={result.segments}
+                inverseScale={inverseScale}
+              />
             )}
-          </>
+            {result.segments?.length > 0 && (
+              <V4Overlay
+                drawingW={drawingW}
+                drawingH={drawingH}
+                segments={result.segments}
+                terminals={result.terminals}
+                selection={selection}
+                inverseScale={inverseScale}
+                onSelect={onSelect}
+              />
+            )}
+            {result.debug_ocr && result.debug_ocr.length > 0 && (
+              <V4OcrOverlay
+                drawingW={drawingW}
+                drawingH={drawingH}
+                matches={result.debug_ocr}
+                selectedIdx={selectedOcrIdx}
+                linkedIdx={linkedOcrIdx}
+                shadeByPressure={shadeByPressure}
+                onSelect={setSelectedOcrIdx}
+              />
+            )}
+          </div>
         )}
       </div>
 

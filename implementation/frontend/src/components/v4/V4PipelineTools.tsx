@@ -1,59 +1,81 @@
 /**
- * Floating pipeline-tools panel — exposes the rasterization DPI for OCR
- * tuning and lets the operator return to the mark-area step. Slider commits
- * on release; redefine-area is one click.
+ * Floating pipeline-tools panel — V4.5 dual-branch (rectangle + circle).
+ * Exposes raster/binary inputs, the area-mask action, and three filter
+ * sections (rectangle filters for ducts, circle filters for terminals,
+ * 3-digit OCR for terminal CFM). Slider commits on release; toggles fire
+ * the request immediately.
  */
 
 import { useEffect, useState } from "react";
 
-interface Props {
-  rectDpi: number;
-  ocrDpi: number;
-  inkThreshold: number;
+interface RectFilters {
   enableMinInk: boolean;
   minInkPct: number;
   enableMaxInk: boolean;
   maxInkPct: number;
   enableSquarish: boolean;
   minDuctAspect: number;
+}
+
+interface Props {
+  rectDpi: number;
+  inkThreshold: number;
+  enableCircle: boolean;
+  minCircularity: number;
+  enableDivider: boolean;
+  minDividerInkPct: number;
+  enableThreeDigit: boolean;
+  enableMinInk: boolean;
+  minInkPct: number;
+  enableMaxInk: boolean;
+  maxInkPct: number;
+  enableSquarish: boolean;
+  minDuctAspect: number;
+  enableVlmOcr: boolean;
   cropActive: boolean;
   busy: boolean;
-  rectanglesReady: boolean;
-  vlmAlreadyRun: boolean;
   onCommitRectDpi: (next: number) => void;
-  onCommitOcrDpi: (next: number) => void;
   onCommitInk: (next: number) => void;
-  onCommitPrefilter: (next: {
-    enableMinInk: boolean;
-    minInkPct: number;
-    enableMaxInk: boolean;
-    maxInkPct: number;
-    enableSquarish: boolean;
-    minDuctAspect: number;
+  onCommitPrefilter: (next: RectFilters & {
+    enableCircle: boolean;
+    minCircularity: number;
+    enableDivider: boolean;
+    minDividerInkPct: number;
+    enableThreeDigit: boolean;
+    enableVlmOcr: boolean;
   }) => void;
   onRedefineArea: () => void;
-  onRunVlmOcr: () => void;
 }
 
 export function V4PipelineTools(props: Props) {
   const {
-    rectDpi, ocrDpi, inkThreshold,
-    enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+    rectDpi, inkThreshold,
+    enableCircle, minCircularity,
+    enableDivider, minDividerInkPct,
+    enableThreeDigit,
+    enableMinInk, minInkPct,
+    enableMaxInk, maxInkPct,
     enableSquarish, minDuctAspect,
-    cropActive, busy, rectanglesReady, vlmAlreadyRun,
-    onCommitRectDpi, onCommitOcrDpi, onCommitInk, onCommitPrefilter,
-    onRedefineArea, onRunVlmOcr,
+    enableVlmOcr,
+    cropActive, busy,
+    onCommitRectDpi, onCommitInk, onCommitPrefilter, onRedefineArea,
   } = props;
+
+  // Collapsed-by-default for the demo: most users won't need to tune
+  // individual filter knobs. A small "Debug" badge expands the full panel.
+  const [expanded, setExpanded] = useState(false);
   const [rectDraft, setRectDraft] = useState(rectDpi);
-  const [ocrDraft, setOcrDraft] = useState(ocrDpi);
   const [inkDraft, setInkDraft] = useState(inkThreshold);
+  const [circDraft, setCircDraft] = useState(minCircularity);
+  const [divDraft, setDivDraft] = useState(minDividerInkPct);
   const [inkPctDraft, setInkPctDraft] = useState(minInkPct);
   const [maxInkPctDraft, setMaxInkPctDraft] = useState(maxInkPct);
   const [aspectDraft, setAspectDraft] = useState(minDuctAspect);
 
   useEffect(() => setRectDraft(rectDpi), [rectDpi]);
-  useEffect(() => setOcrDraft(ocrDpi), [ocrDpi]);
   useEffect(() => setInkDraft(inkThreshold), [inkThreshold]);
+  useEffect(() => setCircDraft(minCircularity), [minCircularity]);
+  useEffect(() => setDivDraft(minDividerInkPct), [minDividerInkPct]);
   useEffect(() => setInkPctDraft(minInkPct), [minInkPct]);
   useEffect(() => setMaxInkPctDraft(maxInkPct), [maxInkPct]);
   useEffect(() => setAspectDraft(minDuctAspect), [minDuctAspect]);
@@ -61,32 +83,52 @@ export function V4PipelineTools(props: Props) {
   const commitRectDpi = () => {
     if (rectDraft !== rectDpi) onCommitRectDpi(rectDraft);
   };
-  const commitOcrDpi = () => {
-    if (ocrDraft !== ocrDpi) onCommitOcrDpi(ocrDraft);
-  };
   const commitInk = () => {
     if (inkDraft !== inkThreshold) onCommitInk(inkDraft);
   };
   const baseFilter = {
-    enableMinInk, enableMaxInk, enableSquarish,
+    enableCircle, enableDivider, enableThreeDigit,
+    minCircularity: circDraft, minDividerInkPct: divDraft,
+    enableMinInk, enableMaxInk, enableSquarish, enableVlmOcr,
     minInkPct: inkPctDraft, maxInkPct: maxInkPctDraft,
     minDuctAspect: aspectDraft,
   };
   const commitPrefilter = () => {
-    if (
-      inkPctDraft !== minInkPct
+    const drifted =
+      circDraft !== minCircularity
+      || divDraft !== minDividerInkPct
+      || inkPctDraft !== minInkPct
       || maxInkPctDraft !== maxInkPct
-      || aspectDraft !== minDuctAspect
-    ) {
-      onCommitPrefilter(baseFilter);
-    }
+      || aspectDraft !== minDuctAspect;
+    if (drifted) onCommitPrefilter(baseFilter);
   };
+  const onToggleCircle = (next: boolean) =>
+    onCommitPrefilter({ ...baseFilter, enableCircle: next });
+  const onToggleDivider = (next: boolean) =>
+    onCommitPrefilter({ ...baseFilter, enableDivider: next });
+  const onToggleThreeDigit = (next: boolean) =>
+    onCommitPrefilter({ ...baseFilter, enableThreeDigit: next });
   const onToggleMinInk = (next: boolean) =>
     onCommitPrefilter({ ...baseFilter, enableMinInk: next });
   const onToggleMaxInk = (next: boolean) =>
     onCommitPrefilter({ ...baseFilter, enableMaxInk: next });
   const onToggleSquarish = (next: boolean) =>
     onCommitPrefilter({ ...baseFilter, enableSquarish: next });
+  const onToggleVlmOcr = (next: boolean) =>
+    onCommitPrefilter({ ...baseFilter, enableVlmOcr: next });
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        className="v4-debug-panel__toggle"
+        onClick={() => setExpanded(true)}
+        aria-label="Show pipeline debug tools"
+      >
+        Debug
+      </button>
+    );
+  }
 
   return (
     <aside
@@ -96,6 +138,14 @@ export function V4PipelineTools(props: Props) {
     >
       <header className="v4-debug-panel__head">
         <strong>Pipeline</strong>
+        <button
+          type="button"
+          className="v4-debug-panel__collapse"
+          onClick={() => setExpanded(false)}
+          aria-label="Collapse pipeline tools"
+        >
+          ×
+        </button>
       </header>
 
       <div className="v4-debug-panel__row">
@@ -117,32 +167,8 @@ export function V4PipelineTools(props: Props) {
           onKeyUp={commitRectDpi}
         />
         <p className="v4-debug-panel__hint">
-          DPI for rectangle detection. Lower = faster, fewer false positives
+          DPI for contour detection. Lower = faster, fewer false positives
           from thin grey lines. Default 100. Changing this clears the area.
-        </p>
-      </div>
-
-      <div className="v4-debug-panel__row">
-        <label htmlFor="v4-ocr-dpi">
-          OCR DPI
-          <span className="v4-debug-panel__value">{ocrDraft}</span>
-        </label>
-        <input
-          id="v4-ocr-dpi"
-          type="range"
-          min={300}
-          max={900}
-          step={50}
-          value={ocrDraft}
-          disabled={busy}
-          onChange={(e) => setOcrDraft(Number(e.target.value))}
-          onMouseUp={commitOcrDpi}
-          onTouchEnd={commitOcrDpi}
-          onKeyUp={commitOcrDpi}
-        />
-        <p className="v4-debug-panel__hint">
-          DPI used to re-rasterize each rectangle for OCR. Higher = clearer
-          text, but slower. Bboxes are scaled by ocr/rect.
         </p>
       </div>
 
@@ -188,7 +214,7 @@ export function V4PipelineTools(props: Props) {
       </div>
 
       <div className="v4-debug-panel__row">
-        <span className="v4-debug-panel__label-line">Pre-filters (no OCR)</span>
+        <span className="v4-debug-panel__label-line">Rectangle filters (ducts)</span>
         <label className="v4-debug-panel__check">
           <input
             type="checkbox"
@@ -271,24 +297,105 @@ export function V4PipelineTools(props: Props) {
           onTouchEnd={commitPrefilter}
           onKeyUp={commitPrefilter}
         />
+        <label className="v4-debug-panel__check">
+          <input
+            type="checkbox"
+            checked={enableVlmOcr}
+            disabled={busy}
+            onChange={(e) => onToggleVlmOcr(e.target.checked)}
+          />
+          <span style={{ flex: 1 }}>VLM OCR (duct labels)</span>
+        </label>
+        <p className="v4-debug-panel__hint">
+          Reads the rectangle dimension grammar (e.g. 22"x14", 14"ø) via
+          masked-clip Tesseract→VLM ladder. Slow on a fresh kept set.
+        </p>
       </div>
 
       <div className="v4-debug-panel__row">
-        <span className="v4-debug-panel__label-line">Step 2 — VLM OCR</span>
-        <div className="v4-debug-panel__crop-row">
-          <button
-            type="button"
-            className="v4-debug-panel__btn"
-            onClick={onRunVlmOcr}
-            disabled={busy || !rectanglesReady}
-          >
-            {vlmAlreadyRun ? "Re-run VLM OCR" : "Run VLM OCR"}
-          </button>
-        </div>
+        <span className="v4-debug-panel__label-line">Circle filter (terminals)</span>
+        <label className="v4-debug-panel__check">
+          <input
+            type="checkbox"
+            checked={enableCircle}
+            disabled={busy}
+            onChange={(e) => onToggleCircle(e.target.checked)}
+          />
+          <span style={{ flex: 1 }}>Apply circle filter</span>
+        </label>
+        <label htmlFor="v4-circularity">
+          Min circularity
+          <span className="v4-debug-panel__value">{circDraft.toFixed(2)}</span>
+        </label>
+        <input
+          id="v4-circularity"
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={circDraft}
+          disabled={busy || !enableCircle}
+          onChange={(e) => setCircDraft(Number(e.target.value))}
+          onMouseUp={commitPrefilter}
+          onTouchEnd={commitPrefilter}
+          onKeyUp={commitPrefilter}
+        />
         <p className="v4-debug-panel__hint">
-          {vlmAlreadyRun
-            ? "VLM has read every kept rectangle — click any blue box."
-            : "Sends each kept rectangle to qwen3-vl. ~1–2 min, parallel."}
+          4π·A/P². Circle≈1.0, square≈0.79, triangle≈0.6.
+        </p>
+      </div>
+
+      <div className="v4-debug-panel__row">
+        <span className="v4-debug-panel__label-line">Divider filter</span>
+        <label className="v4-debug-panel__check">
+          <input
+            type="checkbox"
+            checked={enableDivider}
+            disabled={busy}
+            onChange={(e) => onToggleDivider(e.target.checked)}
+          />
+          <span style={{ flex: 1 }}>Has horizontal divider</span>
+        </label>
+        <label htmlFor="v4-divider">
+          Min centre-row ink
+          <span className="v4-debug-panel__value">
+            {(divDraft * 100).toFixed(0)}%
+          </span>
+        </label>
+        <input
+          id="v4-divider"
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={divDraft}
+          disabled={busy || !enableDivider}
+          onChange={(e) => setDivDraft(Number(e.target.value))}
+          onMouseUp={commitPrefilter}
+          onTouchEnd={commitPrefilter}
+          onKeyUp={commitPrefilter}
+        />
+        <p className="v4-debug-panel__hint">
+          Air terminals (A5) are circles bisected by a horizontal line. Keeps
+          contours where the centre band's densest row is ≥ this fraction ink.
+        </p>
+      </div>
+
+      <div className="v4-debug-panel__row">
+        <span className="v4-debug-panel__label-line">Three-digit OCR filter</span>
+        <label className="v4-debug-panel__check">
+          <input
+            type="checkbox"
+            checked={enableThreeDigit}
+            disabled={busy}
+            onChange={(e) => onToggleThreeDigit(e.target.checked)}
+          />
+          <span style={{ flex: 1 }}>Has 3-digit number</span>
+        </label>
+        <p className="v4-debug-panel__hint">
+          Per-bbox OCR ladder — Tesseract @600 → VLM @600, 900, 1200 DPI.
+          Drops anything that never reads a standalone 3-digit token.
+          OCR results cached by image hash; second run on same image is free.
         </p>
       </div>
     </aside>

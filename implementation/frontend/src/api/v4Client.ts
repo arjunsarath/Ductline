@@ -47,6 +47,11 @@ export interface RunV4Options {
   maxInkPct?: number;
   enableSquarish?: boolean;
   minDuctAspect?: number;
+  enableCircle?: boolean;
+  minCircularity?: number;
+  enableDivider?: boolean;
+  minDividerInkPct?: number;
+  enableThreeDigit?: boolean;
 }
 
 function buildForm(file: File, options: RunV4Options): FormData {
@@ -124,6 +129,21 @@ function buildForm(file: File, options: RunV4Options): FormData {
   }
   if (options.minDuctAspect !== undefined) {
     form.append("min_duct_aspect", String(options.minDuctAspect));
+  }
+  if (options.enableCircle !== undefined) {
+    form.append("enable_circle", String(options.enableCircle));
+  }
+  if (options.minCircularity !== undefined) {
+    form.append("min_circularity", String(options.minCircularity));
+  }
+  if (options.enableDivider !== undefined) {
+    form.append("enable_divider", String(options.enableDivider));
+  }
+  if (options.minDividerInkPct !== undefined) {
+    form.append("min_divider_ink_pct", String(options.minDividerInkPct));
+  }
+  if (options.enableThreeDigit !== undefined) {
+    form.append("enable_three_digit", String(options.enableThreeDigit));
   }
   return form;
 }

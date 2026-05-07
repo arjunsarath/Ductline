@@ -41,6 +41,41 @@ export function V4OcrInspector({ match, onClose }: Props) {
         <dd>{`x=${x}, y=${y}, ${w}×${h} px`}</dd>
         <dt>Confidence</dt>
         <dd>{(match.confidence * 100).toFixed(0)}%</dd>
+        {typeof match.length_ft === "number" && (
+          <>
+            <dt>Length</dt>
+            <dd>{match.length_ft.toFixed(2)} ft</dd>
+          </>
+        )}
+        {typeof match.cfm === "number" && (
+          <>
+            <dt>CFM</dt>
+            <dd>{match.cfm.toFixed(0)}</dd>
+          </>
+        )}
+        {typeof match.velocity_fpm === "number" && (
+          <>
+            <dt>Velocity</dt>
+            <dd>{match.velocity_fpm.toFixed(0)} fpm</dd>
+          </>
+        )}
+        {typeof match.pressure_drop_in_wc === "number" && (
+          <>
+            <dt>Pressure drop</dt>
+            <dd>
+              {match.pressure_drop_in_wc.toFixed(3)}″ w.c.
+              {match.pressure_estimated && (
+                <span className="v4-ocr-inspector__est"> est.</span>
+              )}
+            </dd>
+          </>
+        )}
+        {match.smacna_class && (
+          <>
+            <dt>SMACNA class</dt>
+            <dd>{match.smacna_class}</dd>
+          </>
+        )}
       </dl>
     </aside>
   );

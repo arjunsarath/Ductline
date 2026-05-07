@@ -20,13 +20,13 @@ import { V4AssumptionBanner } from "./V4AssumptionBanner";
 import { V4Progress } from "./V4Progress";
 import { V4SegmentPanel } from "./V4SegmentPanel";
 import { V4SettingsDrawer } from "./V4SettingsDrawer";
-import { V4Sidebar } from "./V4Sidebar";
 import { V4TerminalPanel } from "./V4TerminalPanel";
 import { V4Topbar } from "./V4Topbar";
 import { V4UploadPane } from "./V4UploadPane";
 import { V4Viewer } from "./V4Viewer";
 import { V4MarkAreaScreen } from "./V4MarkAreaScreen";
 import { V4PipelineTools } from "./V4PipelineTools";
+import { V4ResultBar } from "./V4ResultBar";
 import type { CropArea, FilterToggles } from "../../api/v4Client";
 import type { V4Selection } from "./V4Overlay";
 import { useDrawingDims, useFitDims } from "./dims";
@@ -49,6 +49,8 @@ const DEFAULT_INK_THRESHOLD = 90;
 const DEFAULT_MIN_INK_PCT = 0.005;
 const DEFAULT_MAX_INK_PCT = 0.30;
 const DEFAULT_MIN_DUCT_ASPECT = 1.5;
+const DEFAULT_MIN_CIRCULARITY = 0.69;
+const DEFAULT_MIN_DIVIDER_INK_PCT = 0.10;
 
 type Status =
   | { kind: "idle" }
@@ -78,14 +80,35 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
   const [toggles] = useState<FilterToggles>(DEFAULT_TOGGLES);
   const [cropArea, setCropArea] = useState<CropArea | null>(null);
   const [dpi, setDpi] = useState<number>(DEFAULT_RECT_DPI);
-  const [ocrDpi, setOcrDpi] = useState<number>(DEFAULT_OCR_DPI);
+  // OCR DPI stays a constant for now — the rect-grammar VLM ladder picks
+  // its own DPI ladder (600/900/1200) regardless. Frontend just passes the
+  // legacy field through.
+  const [ocrDpi] = useState<number>(DEFAULT_OCR_DPI);
   const [inkThreshold, setInkThreshold] = useState<number>(DEFAULT_INK_THRESHOLD);
+  // Duct-branch (rectangle) filter state — restored alongside the circle
+  // pipeline. Setters are passed through ``onPrefilterCommit`` so toggles
+  // and sliders behave like the circle filter ones.
   const [enableMinInk, setEnableMinInk] = useState(true);
   const [minInkPct, setMinInkPct] = useState<number>(DEFAULT_MIN_INK_PCT);
   const [enableMaxInk, setEnableMaxInk] = useState(true);
   const [maxInkPct, setMaxInkPct] = useState<number>(DEFAULT_MAX_INK_PCT);
   const [enableSquarish, setEnableSquarish] = useState(true);
   const [minDuctAspect, setMinDuctAspect] = useState<number>(DEFAULT_MIN_DUCT_ASPECT);
+  // VLM OCR for duct-grammar labels — required for length / pressure derivation.
+  const [enableVlmOcr, setEnableVlmOcr] = useState(true);
+  // Demo defaults: full pipeline on. Operator can flip individual toggles
+  // off via the (collapsed-by-default) debug panel for stage-by-stage
+  // inspection during development.
+  const [enableCircle, setEnableCircle] = useState(true);
+  const [minCircularity, setMinCircularity] =
+    useState<number>(DEFAULT_MIN_CIRCULARITY);
+  const [enableDivider, setEnableDivider] = useState(true);
+  const [minDividerInkPct, setMinDividerInkPct] =
+    useState<number>(DEFAULT_MIN_DIVIDER_INK_PCT);
+  const [enableThreeDigit, setEnableThreeDigit] = useState(true);
+  // Result-view display controls.
+  const [backgroundOpacity, setBackgroundOpacity] = useState(0.6);
+  const [shadeByPressure, setShadeByPressure] = useState(false);
   const [winSize, setWinSize] = useState({
     w: typeof window !== "undefined" ? window.innerWidth : 1200,
     h: typeof window !== "undefined" ? window.innerHeight : 900,
@@ -138,6 +161,19 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       atDpi: number,
       runVlm: boolean,
       ink: number,
+      circleOn: boolean,
+      circMin: number,
+      divOn: boolean,
+      divMin: number,
+      threeDigitOn: boolean,
+      rectFilters: {
+        enableMinInk: boolean;
+        minInkPct: number;
+        enableMaxInk: boolean;
+        maxInkPct: number;
+        enableSquarish: boolean;
+        minDuctAspect: number;
+      },
     ) => {
       const events: V4ProgressEvent[] = [];
       let lastStage: string | null = null;
@@ -168,12 +204,17 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
           ocrDpi,
           enableVlmOcr: runVlm,
           inkThreshold: ink,
-          enableMinInk,
-          minInkPct,
-          enableMaxInk,
-          maxInkPct,
-          enableSquarish,
-          minDuctAspect,
+          enableMinInk: rectFilters.enableMinInk,
+          minInkPct: rectFilters.minInkPct,
+          enableMaxInk: rectFilters.enableMaxInk,
+          maxInkPct: rectFilters.maxInkPct,
+          enableSquarish: rectFilters.enableSquarish,
+          minDuctAspect: rectFilters.minDuctAspect,
+          enableCircle: circleOn,
+          minCircularity: circMin,
+          enableDivider: divOn,
+          minDividerInkPct: divMin,
+          enableThreeDigit: threeDigitOn,
         };
         const result = await runV4SessionStreaming(target, opts, onEvent);
         setOpVars(result.op_vars);
@@ -205,12 +246,26 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       setCropArea(area);
       void runSession(
         file, opVars, sourceNodeId, debug,
-        minAspectRatio, minWhitePct, toggles, area, cleaned, dpi, false, inkThreshold,
+        minAspectRatio, minWhitePct, toggles, area, cleaned, dpi,
+        enableVlmOcr, inkThreshold,
+        enableCircle, minCircularity,
+        enableDivider, minDividerInkPct,
+        enableThreeDigit,
+        {
+          enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+          enableSquarish, minDuctAspect,
+        },
       );
     },
     [
       file, status, opVars, sourceNodeId, debug,
       minAspectRatio, minWhitePct, toggles, runSession, dpi,
+      enableCircle, minCircularity, inkThreshold,
+      enableDivider, minDividerInkPct,
+      enableThreeDigit,
+      enableVlmOcr,
+      enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+      enableSquarish, minDuctAspect,
     ],
   );
 
@@ -221,7 +276,15 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       if (file) {
         void runSession(
           file, next, srcId, debug,
-          minAspectRatio, minWhitePct, toggles, cropArea, null, dpi, false, inkThreshold,
+          minAspectRatio, minWhitePct, toggles, cropArea, null, dpi,
+          enableVlmOcr, inkThreshold,
+          enableCircle, minCircularity,
+          enableDivider, minDividerInkPct,
+          enableThreeDigit,
+          {
+            enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+            enableSquarish, minDuctAspect,
+          },
         );
       }
       setDrawerOpen(false);
@@ -238,13 +301,27 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       if (file) {
         void runSession(
           file, opVars, sourceNodeId, next,
-          minAspectRatio, minWhitePct, toggles, cropArea, null, dpi, false, inkThreshold,
+          minAspectRatio, minWhitePct, toggles, cropArea, null, dpi,
+          enableVlmOcr, inkThreshold,
+          enableCircle, minCircularity,
+          enableDivider, minDividerInkPct,
+          enableThreeDigit,
+          {
+            enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+            enableSquarish, minDuctAspect,
+          },
         );
       }
     },
     [
       file, opVars, sourceNodeId, minAspectRatio, minWhitePct, toggles,
       cropArea, runSession, dpi,
+      enableCircle, minCircularity, inkThreshold,
+      enableDivider, minDividerInkPct,
+      enableThreeDigit,
+      enableVlmOcr,
+      enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+      enableSquarish, minDuctAspect,
     ],
   );
 
@@ -255,13 +332,27 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       if (file) {
         void runSession(
           file, opVars, sourceNodeId, debug,
-          minAspectRatio, minWhitePct, toggles, null, null, next, false, inkThreshold,
+          minAspectRatio, minWhitePct, toggles, null, null, next,
+          enableVlmOcr, inkThreshold,
+          enableCircle, minCircularity,
+          enableDivider, minDividerInkPct,
+          enableThreeDigit,
+          {
+            enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+            enableSquarish, minDuctAspect,
+          },
         );
       }
     },
     [
       file, opVars, sourceNodeId, debug, minAspectRatio, minWhitePct, toggles,
       runSession,
+      enableCircle, minCircularity, inkThreshold,
+      enableDivider, minDividerInkPct,
+      enableThreeDigit,
+      enableVlmOcr,
+      enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+      enableSquarish, minDuctAspect,
     ],
   );
 
@@ -269,40 +360,52 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
     if (file) void runInitial(file, dpi, inkThreshold);
   }, [file, dpi, inkThreshold, runInitial]);
 
-  const onRunVlmOcr = useCallback(() => {
-    if (!file) return;
-    void runSession(
-      file, opVars, sourceNodeId, debug,
-      minAspectRatio, minWhitePct, toggles, cropArea, null, dpi, true, inkThreshold,
-    );
-  }, [
-    file, opVars, sourceNodeId, debug, minAspectRatio, minWhitePct,
-    toggles, cropArea, dpi, runSession, inkThreshold,
-  ]);
+  // V4.5 alt-approach: per-rectangle VLM OCR is parked while we build the
+  // circle topology. Removed the panel button and its callback for now.
 
   const onPrefilterCommit = useCallback(
     (next: {
+      enableCircle: boolean;
+      minCircularity: number;
+      enableDivider: boolean;
+      minDividerInkPct: number;
+      enableThreeDigit: boolean;
       enableMinInk: boolean;
       minInkPct: number;
       enableMaxInk: boolean;
       maxInkPct: number;
       enableSquarish: boolean;
       minDuctAspect: number;
+      enableVlmOcr: boolean;
     }) => {
+      setEnableCircle(next.enableCircle);
+      setMinCircularity(next.minCircularity);
+      setEnableDivider(next.enableDivider);
+      setMinDividerInkPct(next.minDividerInkPct);
+      setEnableThreeDigit(next.enableThreeDigit);
       setEnableMinInk(next.enableMinInk);
       setMinInkPct(next.minInkPct);
       setEnableMaxInk(next.enableMaxInk);
       setMaxInkPct(next.maxInkPct);
       setEnableSquarish(next.enableSquarish);
       setMinDuctAspect(next.minDuctAspect);
+      setEnableVlmOcr(next.enableVlmOcr);
       if (file) {
-        // We don't depend on the closure-captured filter state because we
-        // pass the new values directly through the next opts; runSession's
-        // closure still reads our latest state on its next invocation.
         void runSession(
           file, opVars, sourceNodeId, debug,
-          minAspectRatio, minWhitePct, toggles, cropArea, null, dpi, false,
-          inkThreshold,
+          minAspectRatio, minWhitePct, toggles, cropArea, null, dpi,
+          next.enableVlmOcr, inkThreshold,
+          next.enableCircle, next.minCircularity,
+          next.enableDivider, next.minDividerInkPct,
+          next.enableThreeDigit,
+          {
+            enableMinInk: next.enableMinInk,
+            minInkPct: next.minInkPct,
+            enableMaxInk: next.enableMaxInk,
+            maxInkPct: next.maxInkPct,
+            enableSquarish: next.enableSquarish,
+            minDuctAspect: next.minDuctAspect,
+          },
         );
       }
     },
@@ -319,13 +422,27 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       if (file) {
         void runSession(
           file, opVars, sourceNodeId, debug,
-          minAspectRatio, minWhitePct, toggles, null, null, dpi, false, next,
+          minAspectRatio, minWhitePct, toggles, null, null, dpi,
+          enableVlmOcr, next,
+          enableCircle, minCircularity,
+          enableDivider, minDividerInkPct,
+          enableThreeDigit,
+          {
+            enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+            enableSquarish, minDuctAspect,
+          },
         );
       }
     },
     [
       file, opVars, sourceNodeId, debug, minAspectRatio, minWhitePct, toggles,
       dpi, runSession,
+      enableCircle, minCircularity,
+      enableDivider, minDividerInkPct,
+      enableThreeDigit,
+      enableVlmOcr,
+      enableMinInk, minInkPct, enableMaxInk, maxInkPct,
+      enableSquarish, minDuctAspect,
     ],
   );
 
@@ -337,9 +454,6 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
   }, []);
 
   const result = status.kind === "ready" ? status.result : null;
-  const vlmAlreadyRun = !!result?.debug_ocr?.some(
-    (m) => m.text && m.text.length > 0,
-  );
   const drawingDims = useDrawingDims(result);
   const fit = useFitDims(drawingDims, winSize);
   const { segment: selectedSegment, terminal: selectedTerminal, segmentWarnings } =
@@ -411,20 +525,31 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
           </div>
         )}
         {result && drawingDims && (
-          <V4Viewer
-            file={file}
-            result={result}
-            drawingW={drawingDims.width}
-            drawingH={drawingDims.height}
-            fitWidth={fit.w}
-            fitHeight={fit.h}
-            selection={selection}
-            viewport={viewport}
-            onViewportChange={setViewport}
-            onSelect={setSelection}
-            onRotate={onRotate}
-            onZoomBy={onZoomBy}
-          />
+          <div className="v4-result-stack">
+            <V4ResultBar
+              matches={result.debug_ocr ?? []}
+              backgroundOpacity={backgroundOpacity}
+              onBackgroundOpacityChange={setBackgroundOpacity}
+              shadeByPressure={shadeByPressure}
+              onShadeByPressureChange={setShadeByPressure}
+            />
+            <V4Viewer
+              file={file}
+              result={result}
+              drawingW={drawingDims.width}
+              drawingH={drawingDims.height}
+              fitWidth={fit.w}
+              fitHeight={fit.h}
+              selection={selection}
+              viewport={viewport}
+              backgroundOpacity={backgroundOpacity}
+              shadeByPressure={shadeByPressure}
+              onViewportChange={setViewport}
+              onSelect={setSelection}
+              onRotate={onRotate}
+              onZoomBy={onZoomBy}
+            />
+          </div>
         )}
         {result && selectedSegment && (
           <V4SegmentPanel
@@ -439,9 +564,6 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
             terminal={selectedTerminal}
             onClose={() => setSelection(null)}
           />
-        )}
-        {result && !selectedSegment && !selectedTerminal && (
-          <V4Sidebar result={result} />
         )}
       </div>
 
@@ -458,24 +580,25 @@ export function V4View({ renderUploadHeader }: V4ViewProps = {}) {
       {result && (
         <V4PipelineTools
           rectDpi={dpi}
-          ocrDpi={ocrDpi}
           inkThreshold={inkThreshold}
+          enableCircle={enableCircle}
+          minCircularity={minCircularity}
+          enableDivider={enableDivider}
+          minDividerInkPct={minDividerInkPct}
+          enableThreeDigit={enableThreeDigit}
           enableMinInk={enableMinInk}
           minInkPct={minInkPct}
           enableMaxInk={enableMaxInk}
           maxInkPct={maxInkPct}
           enableSquarish={enableSquarish}
           minDuctAspect={minDuctAspect}
+          enableVlmOcr={enableVlmOcr}
           cropActive={cropArea !== null}
           busy={status.kind === "loading"}
-          rectanglesReady={(result.debug_ocr?.length ?? 0) > 0}
-          vlmAlreadyRun={vlmAlreadyRun}
           onCommitRectDpi={onDpiCommit}
-          onCommitOcrDpi={setOcrDpi}
           onCommitInk={onInkThresholdCommit}
           onCommitPrefilter={onPrefilterCommit}
           onRedefineArea={onRedefineArea}
-          onRunVlmOcr={onRunVlmOcr}
         />
       )}
     </main>

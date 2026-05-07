@@ -263,6 +263,7 @@ DropReason = Literal["shape_unknown", "diameter_out_of_range", "no_label"]
 RectDropReason = Literal[
     "oversized", "non_duct_text", "low_aspect_ratio", "interior_not_empty",
     "not_rectangle", "interior_no_ink", "too_square", "interior_too_full",
+    "not_circle", "no_horizontal_divider", "no_three_digit",
 ]
 
 
@@ -300,6 +301,32 @@ class DebugOcrMatch(_Frozen):
     # overlay draw the bbox tilted at the rectangle's actual angle instead
     # of the axis-aligned bbox, which over-shoots on rotated ducts.
     oriented_corners: list[tuple[int, int]] | None = None
+    # Duct length in feet, derived after OCR by combining the rotated bbox's
+    # long side with a global px-per-inch scale (median of per-duct scales
+    # computed from each label's first dimension). ``None`` for terminals or
+    # ducts whose label couldn't be parsed.
+    length_ft: float | None = None
+    # MVP airflow attribution: duct gets the CFM of any single terminal that
+    # is directly bbox-adjacent (i.e. one black-pixel hop away on the plan).
+    # Anything more — branched trees, summed downstream CFMs — is the
+    # full-simulation problem and out of scope for the demo. ``None`` when
+    # zero or multiple terminals sit adjacent to the duct, or for terminals
+    # themselves.
+    cfm: float | None = None
+    velocity_fpm: float | None = None
+    # Friction-loss estimate over this duct's length using Darcy: f·(L/Dh)·Vp
+    # with f from ``OperationalVars.friction_factor``. Single-duct number,
+    # not cumulative system static pressure.
+    pressure_drop_in_wc: float | None = None
+    smacna_class: SmacnaClass | None = None
+    # Bbox of the directly-adjacent terminal that supplied this duct's CFM.
+    # Lets the frontend highlight the linked airflow valve when a duct is
+    # clicked. ``None`` for terminals or unattributed ducts.
+    adjacent_terminal_bbox: tuple[int, int, int, int] | None = None
+    # True when the velocity used for the pressure-drop estimate was the
+    # default fallback (1500 fpm) rather than measured from a connected
+    # terminal's CFM. The number is then a length × dimension heuristic.
+    pressure_estimated: bool = False
 
 
 class DebugPolygon(_Frozen):

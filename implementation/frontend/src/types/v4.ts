@@ -129,6 +129,17 @@ export interface DebugOcrMatch {
   crop_data_url?: string | null;
   source?: "tesseract" | "vlm" | "empty" | null;
   oriented_corners?: [number, number][] | null;
+  /** Run length in feet for ducts; null for terminals or un-parsed labels. */
+  length_ft?: number | null;
+  /** MVP airflow attribution from the single directly-adjacent terminal. */
+  cfm?: number | null;
+  velocity_fpm?: number | null;
+  pressure_drop_in_wc?: number | null;
+  smacna_class?: SmacnaClass | null;
+  /** Bbox of the directly-adjacent terminal whose CFM was attributed. */
+  adjacent_terminal_bbox?: [number, number, number, number] | null;
+  /** True when the velocity used for pressure estimation was the fallback. */
+  pressure_estimated?: boolean;
 }
 
 export type RectDropReason =
@@ -136,7 +147,13 @@ export type RectDropReason =
   | "non_duct_text"
   | "low_aspect_ratio"
   | "interior_not_empty"
-  | "not_rectangle";
+  | "not_rectangle"
+  | "interior_no_ink"
+  | "too_square"
+  | "interior_too_full"
+  | "not_circle"
+  | "no_horizontal_divider"
+  | "no_three_digit";
 
 export interface DebugRectangle {
   corners: [number, number][];
@@ -152,6 +169,12 @@ export interface V4ProgressEvent {
   dpi?: number;
   segments?: number;
   terminals?: number;
+  /** Per-bbox OCR ladder progress: bboxes processed so far. */
+  done?: number;
+  /** Total bbox count for the OCR ladder. */
+  total?: number;
+  /** Bboxes kept so far by the 3-digit predicate. */
+  kept?: number;
 }
 
 /** Default OperationalVars matching backend schema defaults (schemas.py). */
