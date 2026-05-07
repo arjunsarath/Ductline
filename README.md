@@ -5,9 +5,10 @@
 >
 > This document is product-level: what it does, why each version exists, what works today, and the production roadmap.
 
-> **Status:** V4 active for outline-based drawings (`testset2.pdf`). V3 retained as
-> the colour-driven fallback path. V1 + V2 archived as design + retrospective.
-> Roadmap and standards-based timeline below.
+> **Status:** V4.5 active — dual-branch detection (rectangles → ducts, circles → air terminals)
+> + CFM-aware pressure attribution. V4 outline detection retained as the inner
+> primitive. V3 retained as the colour-driven fallback path. V1 + V2 archived as
+> design + retrospective. Roadmap and standards-based timeline below.
 > **Repo layout:** `/PRD.md` · `/SOLUTION-DESIGN.md` (V1) · `/SOLUTION-DESIGN-V2.md` ·
 > `/SOLUTION-DESIGN-V3.md` (superseded) · `/SOLUTION-DESIGN-V4.md` (active) ·
 > `/adr/` · `/implementation/` · `/sample-HVAC/` (5 benchmark drawings) ·
@@ -24,9 +25,9 @@ The product wedge is **drawing → structured duct data** — replacing the manu
 
 ---
 
-## 2. Three approaches, one shipping path (V3)
+## 2. Five iterations, one shipping path (V4.5)
 
-Three architectures were attempted in sequence. The sequence matters for understanding the current state and why V3 looks the way it does.
+Five architectures were attempted in sequence — V1 / V2 (VLM-driven, archived), V3 (colour-driven, retained as fallback), V4 (outline-based, contour primitive), and V4.5 (dual-branch + CFM-aware pressure, currently shipping). The sequence matters for understanding the current state.
 
 ### 2.1 V1 — Hybrid VLM + deterministic CV (built, observed limits)
 
@@ -166,6 +167,50 @@ page as an assumptions banner. The full list:
 - Cross-sheet continuations (`see M3.0`) are dead-ends in V4.
 - See `SOLUTION-DESIGN-V4.md` §10 for the full deferred list.
 
+### 2.5 V4.5 — dual-branch detection + CFM-aware pressure (current)
+
+> Full rationale: [`adr/0017-v4.5-dual-branch-and-cfm-aware-pressure.md`](./adr/0017-v4.5-dual-branch-and-cfm-aware-pressure.md).
+> V4 outline detection still runs as the contour primitive; V4.5 layers a
+> second classifier path for air terminals and a length-and-pressure pass
+> on top.
+
+**The pipeline (post-`filter_oversized`):**
+
+```
+post-oversized contours
+  ├─ Duct branch:  filter_is_rectangle → squarish → ink-density → aspect
+  │                → rect-grammar VLM ladder (Tesseract@600 → VLM@600/900/1200)
+  │                → median px-per-inch scale → length_ft per duct
+  └─ Terminal branch: filter_is_circle (4πA/P²) → filter_has_horizontal_divider
+                    → 3-digit OCR ladder (same Tesseract→VLM ladder)
+                    → CFM per terminal
+        ↓
+  Merge → CFM-aware pressure attribution per duct:
+    direct-adjacency (≤6px) → terminal CFM exact
+    fallback              → inverse-distance-weighted CFM proxy across a
+                            scale-derived 4 ft neighborhood
+        ↓
+  Velocity → Darcy ΔP = f·(L/Dh)·(V/4005)² → SMACNA class
+```
+
+**What works on `testset2.pdf` today:**
+
+- Rectangle detection, OCR (`22"x14"`, `14"ø`, …), length in feet derived from a median scale.
+- Air-terminal detection (circle + horizontal divider) and CFM read via the 3-digit OCR ladder.
+- Direct-adjacency duct↔terminal CFM attribution (every duct that touches a terminal gets the exact CFM).
+- Neighborhood-weighted CFM proxy for the rest (a duct in a 700-CFM corridor reads "high pressure" even without a touching terminal).
+- Per-bbox image-hash OCR cache — slider re-fires and parameter tweaks reuse prior reads.
+- Frontend: full-pipeline run on confirm, live progress UI (7 stages with sub-status + per-bbox bars), PDF underlay with adjustable opacity, "shade by pressure class" overlay, click-to-highlight linked terminal, inspector with length / CFM / velocity / ΔP / class, stat strip showing counts + class breakdown.
+
+**What is *not* production yet (full list in §5.4):**
+
+- Network airflow — V4.5 does direct adjacency + a short-radius fallback. A real fan/AHU → trunk → branch → terminal flow trace is intentionally deferred.
+- VLM still hallucinates on hard crops — handled by the duct-grammar regex but not by structural confidence calibration.
+- Image preprocessing assumes upright single-page PDF; scanned/skewed/rotated input fails.
+- Crossings (a duct passes under another, drawn dashed per A7) are not split — the contour fuses, length and CFM bleed across networks.
+- Ducts without dimension labels inside (A9 fallback in V4) are not yet wired through V4.5; they currently drop out of the duct branch.
+- Bends, elbows, tees, transitions, equipment boxes are *contours* but not classified as connectors. The duct branch keeps them or drops them based on ink density alone — segment topology is missing.
+
 ---
 
 ## 3. Why these failure modes are not bugs
@@ -229,9 +274,26 @@ Caveats: timelines assume one engineer full-time on detection/algorithms, plus p
 
 ## 5. Plans for improving the current model
 
-Three improvement vectors, ordered by ROI.
+Four improvement vectors, ordered by ROI. V4.5 is the active product surface, so its path-to-production work (§5.1) is the highest-priority track.
 
-### 5.1 V3 deterministic pipeline — incremental wins (M0–M6)
+### 5.1 Path to V4.5 production quality (M0–M9)
+
+V4.5 demos end-to-end but several engineering surfaces sit at MVP fidelity. Each row is sized as a focused 1–6 week delivery; together they take V4.5 from "demo on `testset2.pdf`" to "trustworthy on the broader benchmark."
+
+| Item | Why it matters | Approach | Effort |
+|---|---|---|---|
+| **Network-traversal CFM** (replace direct adjacency + neighborhood proxy) | Real ducts branch — a trunk's CFM is the *sum* of every downstream terminal. Direct adjacency only fits leaf ducts. | Connected-component analysis on the binary ink mask: every contour in one ink blob shares a network. CFM(duct) = sum(CFM of all terminals in same component). Source node is the largest equipment bbox. ~30 LOC, additive. | 1 wk |
+| **VLM hallucination handling** | The 3-digit ladder catches OCR misreads via the regex predicate; the duct-grammar ladder uses `standardize_duct_label` similarly. But: silent fallbacks (a `θ` read as `0`, a `4'` read as `4` with no inch mark) still slip through and inflate the median px-per-inch scale. | (a) Multi-pass voting at each DPI step (3 generations, majority text wins). (b) Cross-check the OCR'd cross-section against the rectangle's actual pixel-short side at the global scale; reject mismatches >2× off median. (c) Reject reads with non-grammar punctuation (e.g. a CFM read of `1.0`) before they cast a scale vote. | 2 wks |
+| **Image processing** | Today's preprocessing is grey-strip + binarise. Scanned PDFs, skewed exports, low-DPI sources all fail because the contour pipeline assumes crisp B/W with axis-aligned text. | (a) Probe-OCR rotation auto-correct (already in V1; reuse). (b) Adaptive DPI based on smallest text height (RapidOCR's first pass tells us the pixel size of digits → up-render until we hit the OCR confidence floor). (c) Skew correction via Hough-derived dominant line angle. | 2 wks |
+| **Underlying ducts** (dashed crossings, A7) | A duct passing *under* another is rendered with a dashed gap. V4.5's contour pass merges the gap halves into separate broken contours, or worse, fuses them with a different network. | Detect dashed runs (gap pattern in line segments), virtually re-connect them as a single segment with an "underlying" flag. Existing `app/cv/crossings.py` was prototyped in V4 but not used; revive and integrate. | 2 wks |
+| **Ducts without dimensions** (A9 fallback) | If OCR misses a label (or there is none), the duct currently has no length and no pressure. On real plans 10–20% of segments rely on the A9 inheritance / pixel-measurement fallback. | Once a global px-per-inch scale exists from labelled neighbours, derive cross-section from rectangle pixel-short × 1/scale, plausibility-gate to [4″, 60″], emit with `dim_inferred=true`. Wired in V4 design but deferred for V4.5; bring back. | 1 wk |
+| **Bends, elbows, tees, transitions** | These are connectors per A6 — currently they're either kept as small rectangles (false positives in the duct branch) or dropped silently. Without explicit connector classification, the network graph is wrong, length is double-counted at corners, and pressure drop ignores fitting K-values. | Connector classifier: (a) elbow = two corridors meeting at ~90° with a quarter-circle interior; (b) tee/Y = three-way intersection; (c) transition = trapezoid (one short side, one long side); (d) equipment = labelled rectangle from schedule. Existing `app/cv/connectors.py` is prototyped — finish + integrate. K-value lookup already lives in `OperationalVars.fitting_k_table`. | 4–6 wks |
+| **Confidence calibration** | "SMACNA: High" and "CFM: 700" carry the same visual weight today regardless of how derived. A *measured* high differs from an *estimated* high. | Surface `pressure_estimated` already-on-payload as a per-row confidence chip; add per-duct confidence aggregating (label OCR confidence) × (length plausibility) × (CFM source: measured vs neighborhood vs floor). | 2 wks |
+| **Multi-page + cross-sheet** | Real estimating sets are 8–40 sheets. V4.5 enforces single-page. | Same plan as V3 §5.1 — sheet-by-sheet processing with cross-reference resolution. | 3–4 wks |
+
+**Sequence:** start with network-traversal CFM (week 1) — it changes the most about *what the user sees* with the smallest diff. Then VLM hallucination + image processing in parallel (weeks 2–4). Underlying ducts + unlabeled fallback after that (weeks 5–6). Connector classification is the bigger bet (weeks 7–12); it's what gets V4.5 from "shows pressure heat-map" to "computes a real network static-pressure budget."
+
+### 5.2 V3 deterministic pipeline — incremental wins (M0–M6)
 
 Each item below is a focused 1–3 week delivery. They compound.
 
@@ -245,7 +307,7 @@ Each item below is a focused 1–3 week delivery. They compound.
 | **Drawing rotation auto-correction** — currently we trust the source orientation. Some scanned drawings arrive rotated. Detect via OCR-text orientation majority and rotate before processing. | Robustness on scanned input. | 1 week |
 | **Round-duct attribution improvements** — round dims (`13" Ø`) currently attribute via the same in-mask rule as rectangular; round ducts are often labeled with leader lines outside the mask, so a leader-line tracer would help. | Round-duct attribution rate improves on drawings with leader-style callouts. | 2 weeks |
 
-### 5.2 Hybrid VLM-assisted (Year 2)
+### 5.3 Hybrid VLM-assisted (Year 2)
 
 The architectural seam (`VLMClient` in V1, ADR-0002) survives in the codebase precisely so this option remains open. Two flavours:
 
@@ -254,7 +316,7 @@ The architectural seam (`VLMClient` in V1, ADR-0002) survives in the codebase pr
 
 The split is a business decision (cloud-OK customers vs on-prem-only customers), not a technical one. Both share the same pipeline downstream of detection.
 
-### 5.3 Custom detection model (Year 2 H2)
+### 5.4 Custom detection model (Year 2 H2)
 
 A purpose-trained object detector for HVAC duct outlines on rendered drawings:
 
@@ -286,7 +348,7 @@ Defensible reasoning for the architectural decisions, in case future contributor
 
 - **What runs today:** [`implementation/README.md`](./implementation/README.md) — operational details, API, run instructions.
 - **V3 architecture:** [`SOLUTION-DESIGN-V3.md`](./SOLUTION-DESIGN-V3.md) — every stage, every regex, every threshold + the rationale.
-- **Architectural decisions:** [`adr/`](./adr/) — chronological design decisions, including the V3 pivot rationale (ADR-0011, ADR-0012, ADR-0013 added with this round of docs).
+- **Architectural decisions:** [`adr/`](./adr/) — chronological design decisions, including the V3 pivot rationale (ADR-0011, ADR-0012, ADR-0013), V4 outline detection (ADR-0014, ADR-0015, ADR-0016), and the V4.5 dual-branch + CFM-aware pressure choice (ADR-0017).
 - **Why V1 + V2:** [`SOLUTION-DESIGN.md`](./SOLUTION-DESIGN.md), [`SOLUTION-DESIGN-V2.md`](./SOLUTION-DESIGN-V2.md) — kept as design history, not implementation reference.
 - **Sample drawings:** [`sample-HVAC/`](./sample-HVAC/) — 5 benchmark drawings spanning the conventions discussed throughout this README.
 - **User research:** [`synthetic-user-research/`](./synthetic-user-research/) — the interviews that drove the on-prem requirement and the wedge framing.

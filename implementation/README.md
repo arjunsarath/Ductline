@@ -1,9 +1,11 @@
 # Ductline — Implementation
 
 > **What this is:** the running implementation. Two pipelines are live:
-> - **V4** (active for outline-based drawings) — `POST /v4/sessions`, design at
->   [`../SOLUTION-DESIGN-V4.md`](../SOLUTION-DESIGN-V4.md). Adds duct run-length
->   (ft), CFM trace, and per-segment pressure + SMACNA class.
+> - **V4.5** (active dual-branch — rectangles → ducts, circles → air terminals,
+>   plus length + CFM-aware pressure attribution). Same endpoint as V4
+>   (`POST /v4/sessions`), additional fields on the response. Architectural
+>   rationale: [`../adr/0017-v4.5-dual-branch-and-cfm-aware-pressure.md`](../adr/0017-v4.5-dual-branch-and-cfm-aware-pressure.md).
+>   Inner CV primitives still come from V4 ([`../SOLUTION-DESIGN-V4.md`](../SOLUTION-DESIGN-V4.md)).
 > - **V3** (colour-driven fallback) — `POST /v3/render` and `POST /v3/detect`,
 >   design at [`../SOLUTION-DESIGN-V3.md`](../SOLUTION-DESIGN-V3.md) (superseded
 >   header but retained as fallback).
@@ -315,24 +317,29 @@ The picker accepts dark picks (V<60) by detecting the click target is a dark lin
 
 ## 6. Known limitations
 
-### 6.1 V4 (outline-based, current)
+### 6.1 V4.5 (dual-branch, current)
 
-1. **Rectangular dimension labels on dense angled ducts** can be missed by
-   OCR; the segment then falls back to a round-pixel-width estimate. Observed
-   on the `22"x14"` duct in `testset2.pdf`.
-2. **Sparse terminal-to-segment incidence** on `testset2.pdf` — ~178
-   terminals are detected but few attach to segments due to limited CV recall
-   on cross-cut bars; CFM accumulation on those segments is suppressed. CV
-   recall on cross-cut bars is the next iteration target.
-3. **Single page only.** The runner enforces single-page input; multi-page
-   PDFs require the user to pick a page before upload.
-4. **CFM source is terminal symbols only.** Plan-note prose CFM (e.g.,
-   `2,800 CFM up to roof`) is not parsed (A14).
-5. **Equipment nodes** (VAV / FPB / AHU) are treated as generic connectors;
-   no equipment-type semantics.
-6. **Cross-sheet continuations** (`see M3.0`) are dead-ends in V4.
-7. See [`../SOLUTION-DESIGN-V4.md`](../SOLUTION-DESIGN-V4.md) §10 for the full
-   deferred list.
+What works on `testset2.pdf` end-to-end:
+
+- Rectangle contour detection + duct-grammar OCR (`22"x14"`, `14"ø`) via Tesseract→VLM ladder, 8 workers, image-hash cached.
+- Circle contour detection + horizontal-divider check + 3-digit CFM OCR (same ladder, same cache).
+- Median px-per-inch scale → length in feet per duct.
+- Direct-adjacency CFM (≤6 px duct↔terminal bbox edge) → terminal CFM exact.
+- Neighborhood-weighted CFM proxy across a scale-derived 4 ft radius for ducts without a touching terminal.
+- Velocity → Darcy ΔP → SMACNA class (Low/Medium/High) per duct.
+- Frontend: full-pipeline-on-confirm, 7-stage progress UI with per-bbox progress bars, PDF underlay with adjustable opacity, "shade by pressure class" overlay, click-to-highlight linked terminal, inspector with length/CFM/velocity/ΔP/class + `est.` flag for fallback values, stat strip with counts and class breakdown.
+
+Known limitations (see [§5.1 of the product README](../README.md) for the production roadmap addressing each):
+
+1. **Network airflow is not summed.** A trunk duct with several downstream terminals gets the *neighborhood-weighted* proxy, not the sum. Direct simulation is the §5.1 first item.
+2. **VLM still hallucinates** on hard crops. The 3-digit regex predicate and `standardize_duct_label` catch most, but a digit OCR'd as a similar glyph can pass and inflate the median scale. Multi-pass voting + cross-check against pixel-short-side is queued in §5.1.
+3. **Image preprocessing is grey-strip + binarise only.** Scanned PDFs, skewed exports, low-DPI sources fail. Probe-OCR rotation auto-correct and adaptive DPI both exist in V1's `app/pipeline/probe_ocr.py` and need re-wiring.
+4. **Underlying ducts (A7 dashed crossings) fuse or break.** `app/cv/crossings.py` has prototype logic but isn't on the V4.5 path.
+5. **Ducts without dimension labels drop out** of the duct branch entirely. A9 pixel-measurement fallback was wired in V4 design (`_synthesize_missing_labels` in `runner_v4.py`) but is currently dead code on the dual-branch path.
+6. **Bends, elbows, tees, transitions are not classified as connectors.** They appear as small or oddly-shaped rectangles; the duct branch keeps or drops them based on ink density alone. `app/cv/connectors.py` has prototype detectors. Fitting K-values already live in `OperationalVars.fitting_k_table`, so the wiring is the missing piece, not the math.
+7. **Single-page PDFs only.** `read_page_rotation` raises if `doc.page_count != 1`.
+8. **Equipment nodes** (VAV / FPB / AHU) treated as generic rectangles. No equipment-type semantics.
+9. **Cross-sheet continuations** (`see M3.0`) are dead-ends.
 
 ### 6.2 V3 (colour-driven fallback)
 
