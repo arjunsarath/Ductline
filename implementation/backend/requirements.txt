@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pdfplumber==0.11.4
+python-multipart==0.0.12
+pydantic==2.9.2
+pypdfium2==5.8.0
+pytesseract==0.3.13
+Pillow==12.2.0
