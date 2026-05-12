@@ -32,9 +32,6 @@ cd implementation/backend
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# requirements.txt does not currently pin PyMuPDF, but extractor.py and
-# preprocess.py both `import fitz`. Install it manually:
-pip install pymupdf
 ```
 
 You should now be able to run:
@@ -94,7 +91,7 @@ pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
 
 ### `ModuleNotFoundError: No module named 'fitz'`
 
-PyMuPDF is imported by `extractor.py` and `preprocess.py` but not pinned in `requirements.txt`. `pip install pymupdf` inside the venv.
+PyMuPDF wasn't installed. `pip install -r requirements.txt` inside the venv should pull it; if it didn't, run `pip install pymupdf` directly.
 
 ### `Address already in use` (port 8000)
 
@@ -138,7 +135,7 @@ It shouldn't — `runPipeline` has a deliberate `await new Promise(r => setTimeo
 
 ### `dpi: 1200` in the scale response but the OCR is still wrong
 
-Tesseract is sensitive to image preparation. `_strip_non_black` uses `black_threshold` (default `0.05`, frontend overrides to `0.02`) to threshold the rendered crop to pure black/white. If callouts come through faint (grey ink, screened fills), raise the threshold by tweaking the form value in `runPipeline` or the default in `main.py`.
+Tesseract is sensitive to image preparation. `_strip_non_black` uses `black_threshold` (default `0.02`) to threshold the rendered crop to pure black/white. If callouts come through faint (grey ink, screened fills), raise the threshold by tweaking the form value in `runPipeline` (frontend) or the default in `main.py`.
 
 The `_O_SLASH_SUBSTITUTES` set in `scale_detector.py` is `"@°ØøOoDd6¢"`. If Tesseract is reading a glyph as something not in that set (rare but possible — e.g. `*`, `o̸`), add it to the constant and the regex character class will pick it up.
 

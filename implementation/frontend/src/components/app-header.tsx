@@ -24,7 +24,7 @@ export default function AppHeader({ filename, meta, onReset, className }: Props)
         <div className="flex size-6 items-center justify-center rounded-md bg-primary/15 text-primary">
           <FileText className="size-3.5" strokeWidth={2.25} />
         </div>
-        <span className="text-[13px] font-semibold tracking-tight">Techjay</span>
+        <span className="text-[13px] font-semibold tracking-tight">Ductline</span>
         <span className="text-xs text-muted-foreground/70">·</span>
         <span className="text-[12px] uppercase tracking-[0.14em] text-muted-foreground">
           PDF Inspector

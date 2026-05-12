@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Techjay · PDF Element Inspector",
-  description: "Debug viewer for pdfplumber element extraction.",
+  title: "Ductline · PDF Duct Inspector",
+  description: "Vector-PDF duct extraction and scale detection.",
 };
 
 export default function RootLayout({

@@ -66,7 +66,7 @@ Multipart form:
 | `file` | file (`%PDF`) | yes | ≤25 MB |
 | `page_number` | int | yes | 1-based |
 | `crop` | string | yes | JSON object `{x0, top, x1, bottom}` |
-| `black_threshold` | float | no | `[0,1]`, default `0.05`. Frontend overrides to `0.02`. |
+| `black_threshold` | float | no | `[0,1]`, default `0.02`. |
 
 Response (`ScaleResponse`):
 
@@ -130,10 +130,6 @@ If `crop` is provided, the element list is filtered to those whose bbox intersec
 #### Colour conversion (`_color_to_hex`)
 
 pdfplumber returns colour tuples as 1-, 3-, or 4-floats in `[0,1]`. The 4-tuple is **CMYK**, not RGBA — `_color_to_hex` converts CMYK to RGB using the subtractive-mix approximation `(1-c)*(1-k)`. An earlier version returned `None` for 4-tuples, which mis-tagged CMYK-black callouts (common in CAD output) as colourless. The parity comment in `_color_to_hex` exists because the frontend filter then rejected those rects via the colour threshold — keep this in sync with `scale_detector._is_black`.
-
-#### Dead code
-
-`_visible_drawing_bboxes` and `_bbox_overlaps_any` are defined but never called. They were an attempt to cross-check pdfplumber's element list against PyMuPDF's `get_drawings()` output to drop entries on hidden PDF layers (Optional Content Groups), which pdfplumber ignores. The cross-check is not invoked anywhere in `extract_pdf`. Leave them or strip them as you like.
 
 #### The `rect_curve.corners` double-Y-flip
 
@@ -254,4 +250,4 @@ These corners ship to the frontend in `rect_curve.corners` but **double-Y-flippe
 
 `build_preprocessed_svg(pdf_bytes, page_number, crop_bbox, black_threshold)` renders the cropped page to SVG via PyMuPDF (`page.get_svg_image(matrix=Matrix(1,1), text_as_path=False)`), then walks the tree dropping every element whose fill and stroke are both non-black. The SVG `viewBox` is rewritten to the crop region and `width`/`height` stripped so the host CSS box controls sizing.
 
-Still wired to `POST /api/preprocess`. The current frontend doesn't call it — the viewer renders the original PDF via react-pdf instead. Keep or delete as appropriate; deletion would also let you remove the PyMuPDF dependency from `preprocess.py` (but `extractor.py` would still need it for `fitz` even though its only `fitz` use is dead code — see above).
+Still wired to `POST /api/preprocess`. The current frontend doesn't call it — the viewer renders the original PDF via react-pdf instead. Keep or delete as appropriate; deletion would let you drop PyMuPDF from the dependency list entirely.

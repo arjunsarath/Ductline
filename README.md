@@ -1,4 +1,4 @@
-# Techjay PDF Duct Inspector
+# Ductline
 
 An interactive viewer for HVAC plan PDFs. The user uploads a vector PDF, crops the drawing region, and the tool extracts every vector element inside the crop, finds the `NN"Ø` duct-diameter callouts, infers the drawing's scale (PDF points per real-world inch), and overlays the surviving plausible-duct rectangles on top of the original page.
 
@@ -33,7 +33,6 @@ cd implementation/backend
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install pymupdf          # see backend.md — fitz is imported but not pinned
 uvicorn main:app --reload --port 8000
 ```
 
@@ -98,4 +97,3 @@ Single-session, no persistence. The PDF is held as an in-memory `File` and `URL.
 - 25 MB upload cap (enforced server-side).
 - `inferred_rect` (synthetic rectangles from two `rect_partial` U-shapes) is disabled — see `extractor.py` for the reason. The type stays in the schema so it can be re-enabled without API changes.
 - `rect_curve.corners` are double-Y-flipped vs the rest of the response. The viewer works around it by rendering bboxes; side lengths (the values used for filtering and measurement labels) are unaffected. Details in [`docs/architecture.md`](docs/architecture.md#coordinate-systems).
-- PyMuPDF (`fitz`) is imported by `extractor.py` and `preprocess.py` but missing from `requirements.txt`. Install it manually until that's fixed.

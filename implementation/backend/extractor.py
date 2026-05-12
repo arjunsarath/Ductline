@@ -3,45 +3,9 @@ from __future__ import annotations
 import io
 from typing import Any
 
-import fitz  # PyMuPDF — respects PDF optional-content (layer) visibility
 import pdfplumber
 
 from scale_detector import _is_rect_partial, _is_rectlike_curve, rect_corners_from_curve
-
-
-def _visible_drawing_bboxes(pdf_bytes: bytes, page_number: int) -> list[tuple[float, float, float, float]]:
-    """Bboxes of every vector drawing PyMuPDF reports as visible on the page.
-
-    pdfplumber ignores PDF Optional Content Groups (layers), so it returns
-    paths from hidden layers (equipment markers, dimension lines, etc.) that
-    don't render in the SVG. We cross-check pdfplumber's element list against
-    this set to drop everything the user can't see."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        page = doc[page_number - 1]
-        bboxes: list[tuple[float, float, float, float]] = []
-        for d in page.get_drawings():
-            r = d.get("rect")
-            if r is None:
-                continue
-            bboxes.append((float(r[0]), float(r[1]), float(r[2]), float(r[3])))
-        return bboxes
-    finally:
-        doc.close()
-
-
-def _bbox_overlaps_any(
-    x0: float, top: float, x1: float, bottom: float,
-    visible: list[tuple[float, float, float, float]],
-    tol: float = 2.0,
-) -> bool:
-    for vx0, vy0, vx1, vy1 in visible:
-        if x1 < vx0 - tol or x0 > vx1 + tol:
-            continue
-        if bottom < vy0 - tol or top > vy1 + tol:
-            continue
-        return True
-    return False
 
 BBox = tuple[float, float, float, float]  # (x0, top, x1, bottom)
 

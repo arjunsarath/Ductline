@@ -14,7 +14,7 @@ from scale_detector import detect_scale_callouts
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-app = FastAPI(title="Techjay PDF Extractor")
+app = FastAPI(title="Ductline PDF Extractor")
 
 app.add_middleware(
     CORSMiddleware,
@@ -182,7 +182,7 @@ async def preprocess(
     file: UploadFile = File(...),
     page_number: int = Form(...),
     crop: str = Form(...),
-    black_threshold: float = Form(default=0.05),
+    black_threshold: float = Form(default=0.02),
 ) -> Response:
     """Return a single-page PDF showing only the masked crop, binarised to
     pure black/white at the requested threshold. Used by the viewer as the
@@ -212,7 +212,7 @@ async def detect_scale(
     file: UploadFile = File(...),
     page_number: int = Form(...),
     crop: str = Form(...),
-    black_threshold: float = Form(default=0.05),
+    black_threshold: float = Form(default=0.02),
 ) -> ScaleResponse:
     data = await file.read()
 

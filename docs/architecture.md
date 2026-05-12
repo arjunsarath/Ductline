@@ -41,7 +41,7 @@ The frontend orchestrates three named stages. Stage state is `idle | running | d
 
 ### 2. Detect scale (`POST /api/detect-scale`)
 
-- **Request**: multipart `file` + `page_number` + `crop` (JSON object for one region) + `black_threshold` (frontend sends `0.02`; backend default is `0.05`).
+- **Request**: multipart `file` + `page_number` + `crop` (JSON object for one region) + `black_threshold` (default `0.02`).
 - **Response**: `ScaleResponse` — `page_number`, `dpi`, `callouts[]`, `drawing_scale_pts_per_inch` (nullable), `callout_count`.
 - **Per-region**: one HTTP call per crop region. The frontend runs all calls in parallel via `Promise.all`.
 - **Failure**: the pipeline fails if any region returns a non-2xx, or if any region returns `drawing_scale_pts_per_inch === null` (i.e. no callout had a matching duct rectangle).
