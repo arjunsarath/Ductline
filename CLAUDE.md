@@ -1,1 +1,0 @@
-Always spawn subagents and worklike a supervisor to keep your context clean and minimal
