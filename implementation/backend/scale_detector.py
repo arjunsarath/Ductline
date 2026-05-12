@@ -14,29 +14,57 @@ from PIL import Image
 BBox = tuple[float, float, float, float]  # (x0, top, x1, bottom) — top-left origin, PDF points
 
 # Tesseract reads the `ø` glyph in CAD fonts as one of these chars. `O`/`o`/`D`/`d`
-# show up when the slash is faint; `@`/`°` when it's bold; `6` when the loop is open.
-_O_SLASH_SUBSTITUTES = "@°ØøOoDd6"
+# show up when the slash is faint; `@`/`°` when it's bold; `6` when the loop is
+# open; `¢` when the slash is read as the cent sign. The glyph also routinely
+# splits into TWO characters in a row (`°@`, `°¢`) when Tesseract treats the
+# top of the circle and the body as separate tokens — hence the `+` below.
+_O_SLASH_SUBSTITUTES = "@°ØøOoDd6¢"
 _CALLOUT_RE = re.compile(
-    rf'^\s*(\d+(?:\.\d+)?)\s*(?:"|″)?\s*([{re.escape(_O_SLASH_SUBSTITUTES)}])\s*$'
+    rf'^\s*(\d+(?:\.\d+)?)\s*(?:"|″)?\s*([{re.escape(_O_SLASH_SUBSTITUTES)}]+)\s*$'
 )
 
-# Tesseract config. LSTM-only engine (`--oem 1`) is the most accurate. Sparse
-# text segmentation (`--psm 11`) matches engineering-drawing layouts where
-# labels are scattered, not paragraphed. No character whitelist — restricting
-# the vocabulary forces wrong substitutions for `"` and tanks confidence on
-# legit callouts (verified empirically: `14"@` drops from 76% to 0% with a
-# whitelist that excludes `"`, and `"` can't be safely included because
-# pytesseract's shlex-split chokes on it).
-_TESSERACT_CONFIG = '--oem 1 --psm 11'
+# Single-line OCR config for the per-box pass. PSM 7 = "treat the image as a
+# single text line" — the right segmenter for a label-sized crop containing
+# just the callout. LSTM-only (`--oem 1`) is the most accurate engine. No
+# whitelist (see below).
+#
+# We deliberately do NOT restrict the character set: empirically `14"@` drops
+# from 76% to 0% confidence with a whitelist that excludes `"`, and `"` can't
+# be safely included because pytesseract's shlex-split chokes on it.
+_BOX_OCR_CONFIG = '--oem 1 --psm 7'
+# Tiny crops can afford much higher DPI than the full-page pass — a 40pt × 16pt
+# callout at 1200 DPI is ~667 × 267 px, still cheap, and gives Tesseract crisp
+# edges instead of the aliased glyphs from the 600 DPI full-crop pass.
+_BOX_OCR_DPI = 1200
+# Inset before rendering so the box's own border rule doesn't intrude on the
+# OCR'd glyphs.
+_BOX_INSET_PT = 1.0
 
-# Tesseract confidence floor. The `@`/`°`/`6` substitution for `ø` is itself
-# a Tesseract miss-read, so legit duct callouts often score in the 40s–60s.
-# We rely on the gap-plausibility check below to reject the truly-wrong reads.
-_MIN_CONF = 45
+# Tesseract confidence floor. The `@`/`°`/`¢`/`6` substitution for `ø` is itself
+# a miss-read, so legit duct callouts often score in the 20s–60s — especially
+# when Tesseract splits Ø into two characters (e.g. `°@`) and reports a low
+# confidence on each piece. We rely on the downstream gates (regex shape,
+# diameter range, geometry plausibility, band-mean outliers) to reject the
+# truly-wrong reads, so this floor only has to filter out random gibberish.
+_MIN_CONF = 20
 # Real HVAC ducts in typical drawings sit inside this range; rejects stray
 # year numbers ("2024@") and footer page numbers that pass the regex.
 _MIN_DIAMETER_IN = 2.0
 _MAX_DIAMETER_IN = 80.0
+
+# A callout box is small and elongated — wide enough for "NN\"Ø" at ~10pt
+# font, tall enough for one line of text. These bounds reject duct rectangles
+# (much larger) and stray glyph fragments (smaller).
+_MIN_CALLOUT_WIDTH_PT = 15.0
+_MAX_CALLOUT_WIDTH_PT = 80.0
+_MIN_CALLOUT_HEIGHT_PT = 8.0
+_MAX_CALLOUT_HEIGHT_PT = 22.0
+_MIN_CALLOUT_ASPECT = 1.4
+
+# All callouts on one drawing share an exact scale; differences come from
+# picking the wrong wall pair on a single duct, not measurement noise. Keep
+# pts/in values within ±10% of the median, mean the survivors.
+_SCALE_BAND_PCT = 0.10
 
 # Search window around a callout centre for candidate duct walls (PDF points).
 # 120pt ≈ 1.7 inches at 1:1 — wide enough for the longest duct labels seen,
@@ -53,6 +81,11 @@ _MIN_WALL_GAP = 3.0
 # declared diameter — kills pairs grabbed from grid/border lines far across the page.
 _MIN_SCALE_PTS_PER_IN = 0.3
 _MAX_SCALE_PTS_PER_IN = 5.0
+# A real duct's centreline runs through (or very near) its callout. We require
+# the wall-pair midline to be within `max(gap/2, MIDLINE_TOL_PT)` of the
+# callout centre — gap/2 means "callout is between the walls", and the floor
+# keeps the constraint reasonable for tiny ducts where gap/2 would be < 3pt.
+_MIDLINE_TOL_PT = 10.0
 
 
 def _normalise_callout(raw: str) -> tuple[str, float] | None:
@@ -112,61 +145,149 @@ def _strip_non_black(img: Image.Image, max_luma: float) -> Image.Image:
     )
 
 
-def _ocr_callouts(
-    img: Image.Image,
-    crop_bbox: BBox,
-    dpi: int,
-) -> list[dict[str, Any]]:
-    """OCR the crop and emit normalised callouts with PDF-point bboxes."""
-    data = pytesseract.image_to_data(
-        img, config=_TESSERACT_CONFIG, output_type=pytesseract.Output.DICT
+def _filter_callout_candidate_boxes(
+    rects: list[dict[str, float]],
+) -> list[dict[str, float]]:
+    """Keep rectangles sized like callout labels: small, elongated. Drops the
+    duct rectangles themselves (much wider) and stray glyph fragments."""
+    out: list[dict[str, float]] = []
+    for r in rects:
+        w = r["x1"] - r["x0"]
+        h = r["bottom"] - r["top"]
+        if w <= 0 or h <= 0:
+            continue
+        if not (_MIN_CALLOUT_WIDTH_PT <= w <= _MAX_CALLOUT_WIDTH_PT):
+            continue
+        if not (_MIN_CALLOUT_HEIGHT_PT <= h <= _MAX_CALLOUT_HEIGHT_PT):
+            continue
+        if max(w / h, h / w) < _MIN_CALLOUT_ASPECT:
+            continue
+        out.append(r)
+    return out
+
+
+def _dedupe_boxes(
+    boxes: list[dict[str, float]], tol: float = 2.0
+) -> list[dict[str, float]]:
+    """Drop boxes whose centres coincide. CAD exporters routinely emit both a
+    `re` operator and a 4-line path for the same rectangle — we'd otherwise
+    OCR the same callout twice and double-count its scale."""
+    kept: list[dict[str, float]] = []
+    for b in boxes:
+        cx = 0.5 * (b["x0"] + b["x1"])
+        cy = 0.5 * (b["top"] + b["bottom"])
+        if any(
+            abs(0.5 * (k["x0"] + k["x1"]) - cx) < tol
+            and abs(0.5 * (k["top"] + k["bottom"]) - cy) < tol
+            for k in kept
+        ):
+            continue
+        kept.append(b)
+    return kept
+
+
+def _ocr_callout_box(
+    pdf: pdfium.PdfDocument,
+    page_index: int,
+    box: dict[str, float],
+    black_threshold: float,
+) -> tuple[str, float, int, BBox] | None:
+    """Render `box` at high DPI and OCR with PSM 7. Returns
+    (canonical_text, diameter_inches, confidence, text_bbox_pdf) or None.
+
+    The inset trims the box's own border out of the OCR'd image; otherwise
+    Tesseract sees the rule as a vertical bar and corrupts the leading digit."""
+    inset: BBox = (
+        box["x0"] + _BOX_INSET_PT,
+        box["top"] + _BOX_INSET_PT,
+        box["x1"] - _BOX_INSET_PT,
+        box["bottom"] - _BOX_INSET_PT,
     )
-    px_to_pt = 72.0 / dpi
-    crop_x0, crop_top, _, _ = crop_bbox
+    if inset[2] <= inset[0] or inset[3] <= inset[1]:
+        return None
 
-    # Diagnostic dump: every token Tesseract returned with its confidence.
-    all_tokens = [
-        (data["text"][i], data["conf"][i])
-        for i in range(len(data["text"]))
-        if data["text"][i] and data["text"][i].strip()
-    ]
-    print(f"[detect-scale] {len(all_tokens)} tokens: {all_tokens[:60]}")
+    img = _render_crop(pdf, page_index, inset, _BOX_OCR_DPI)
+    img = _strip_non_black(img, black_threshold)
+    data = pytesseract.image_to_data(
+        img, config=_BOX_OCR_CONFIG, output_type=pytesseract.Output.DICT
+    )
 
-    callouts: list[dict[str, Any]] = []
-    for i, raw in enumerate(data["text"]):
-        if not raw or not raw.strip():
+    tokens: list[tuple[str, int, tuple[int, int, int, int]]] = []
+    for i in range(len(data["text"])):
+        txt = data["text"][i]
+        if not txt or not txt.strip():
             continue
         try:
             conf = int(float(data["conf"][i]))
         except (TypeError, ValueError):
             continue
-        if conf < _MIN_CONF:
-            continue
-        normalised = _normalise_callout(raw)
-        if normalised is None:
-            continue
-        text, diameter_in = normalised
-        print(f"[detect-scale] match: {raw!r} → {text!r} conf={conf}")
-
-        # Pixel bbox → PDF-point bbox (crop image origin maps to crop_x0/crop_top).
-        left_px = data["left"][i]
-        top_px = data["top"][i]
-        w_px = data["width"][i]
-        h_px = data["height"][i]
-        bbox: BBox = (
-            crop_x0 + left_px * px_to_pt,
-            crop_top + top_px * px_to_pt,
-            crop_x0 + (left_px + w_px) * px_to_pt,
-            crop_top + (top_px + h_px) * px_to_pt,
+        tokens.append(
+            (
+                txt,
+                conf,
+                (
+                    int(data["left"][i]),
+                    int(data["top"][i]),
+                    int(data["width"][i]),
+                    int(data["height"][i]),
+                ),
+            )
         )
-        callouts.append({
-            "raw_text": raw,
-            "text": text,
-            "diameter_in": diameter_in,
-            "confidence": conf,
-            "bbox": bbox,
-        })
-    return callouts
+    if not tokens:
+        return None
+
+    # PSM 7 typically returns one word per token. Try the joined run first
+    # (covers `"8"`, `"`, `"Ø"` split into three), then individual tokens
+    # (covers `"8\"Ø"` returned as one).
+    joined = "".join(t[0] for t in tokens)
+    matched = _normalise_callout(joined)
+    if matched is None:
+        for txt, _, _ in tokens:
+            matched = _normalise_callout(txt)
+            if matched is not None:
+                break
+    if matched is None:
+        print(f"[detect-scale] no callout in box {joined!r}")
+        return None
+
+    text, diameter_in = matched
+    min_conf = min(t[1] for t in tokens)
+    if min_conf < _MIN_CONF:
+        print(f"[detect-scale] low conf {min_conf} for {joined!r} → {text!r}")
+        return None
+
+    # Tight text bbox = union of token sub-bboxes, mapped back to PDF pts.
+    left_px = min(t[2][0] for t in tokens)
+    top_px = min(t[2][1] for t in tokens)
+    right_px = max(t[2][0] + t[2][2] for t in tokens)
+    bottom_px = max(t[2][1] + t[2][3] for t in tokens)
+    px_to_pt = 72.0 / _BOX_OCR_DPI
+    text_bbox: BBox = (
+        inset[0] + left_px * px_to_pt,
+        inset[1] + top_px * px_to_pt,
+        inset[0] + right_px * px_to_pt,
+        inset[1] + bottom_px * px_to_pt,
+    )
+    print(f"[detect-scale] box-OCR {joined!r} → {text!r} conf={min_conf}")
+    return text, diameter_in, min_conf, text_bbox
+
+
+def _aggregate_scale(scales: list[float]) -> float | None:
+    """Mean of pts/in values within ±_SCALE_BAND_PCT of the median. Real
+    callouts on one drawing all share an exact scale, so outliers are extreme
+    (wrong wall pair, leader line) rather than Gaussian noise — band+mean
+    rejects them cleanly. Falls back to the median when nothing survives the
+    band (defensive; shouldn't occur since the median is itself in band)."""
+    if not scales:
+        return None
+    med = median(scales)
+    lo = med * (1 - _SCALE_BAND_PCT)
+    hi = med * (1 + _SCALE_BAND_PCT)
+    kept = [v for v in scales if lo <= v <= hi]
+    rejected = len(scales) - len(kept)
+    if rejected:
+        print(f"[detect-scale] dropped {rejected} outlier scale(s); mean of {len(kept)}")
+    return sum(kept) / len(kept) if kept else med
 
 
 def _is_black(color: Any, max_luma: float) -> bool:
@@ -489,40 +610,18 @@ def _load_page_lines_and_rects(
     return lines, rects
 
 
-def _enclosing_rect(
-    bbox: BBox, rects: list[dict[str, float]]
-) -> dict[str, float] | None:
-    """Return the smallest rectangle whose interior contains the bbox centre."""
-    cx = 0.5 * (bbox[0] + bbox[2])
-    cy = 0.5 * (bbox[1] + bbox[3])
-    matches = [
-        r for r in rects
-        if r["x0"] <= cx <= r["x1"] and r["top"] <= cy <= r["bottom"]
-    ]
-    if not matches:
-        return None
-    return min(matches, key=lambda r: (r["x1"] - r["x0"]) * (r["bottom"] - r["top"]))
-
-
-def _line_angle_deg(ln: dict[str, float]) -> float:
-    """Angle in degrees, normalised to [0, 180)."""
-    dx = ln["x1"] - ln["x0"]
-    dy = ln["bottom"] - ln["top"]
-    angle = math.degrees(math.atan2(dy, dx))
-    return angle % 180.0
-
-
-def _perpendicular_distance(a: dict[str, float], b: dict[str, float]) -> float:
-    """Distance from midpoint of `b` to the infinite line through `a`."""
-    ax, ay = a["x0"], a["top"]
-    bx, by = a["x1"], a["bottom"]
-    px = 0.5 * (b["x0"] + b["x1"])
-    py = 0.5 * (b["top"] + b["bottom"])
-    dx, dy = bx - ax, by - ay
+def _signed_perp(line: dict[str, float], px: float, py: float) -> float:
+    """Signed perpendicular distance from (px, py) to the infinite line through
+    line's start→end. Sign follows the line's directed sense — meaningful only
+    relative to another value computed against the SAME line, or relative to a
+    second line whose direction has been aligned (see `_infer_geometry`)."""
+    x0, y0 = line["x0"], line["top"]
+    x1, y1 = line["x1"], line["bottom"]
+    dx, dy = x1 - x0, y1 - y0
     norm = math.hypot(dx, dy)
     if norm == 0:
-        return math.hypot(px - ax, py - ay)
-    return abs(dy * px - dx * py + bx * ay - by * ax) / norm
+        return 0.0
+    return (dx * (py - y0) - dy * (px - x0)) / norm
 
 
 def _infer_geometry(
@@ -533,11 +632,13 @@ def _infer_geometry(
     """Return (duct_bbox, drawn_diameter_pts, scale_pts_per_inch, wall_pairs)
     or None.
 
-    For a single callout, we pair up nearby parallel lines and pick the
-    *largest* perpendicular gap that still implies a plausible drawing scale
-    — this matches the duct's outer envelope rather than the inner cavity
-    when both are drawn. The plausibility window is what stops a stray pair
-    of axis/grid lines from getting picked up as walls."""
+    Wall-pair selection: pair up nearby parallel lines, keep only those whose
+    midline is within `max(gap/2, MIDLINE_TOL_PT)` of the callout centre (i.e.
+    the callout actually sits between the walls, not somewhere off to the
+    side), and among the survivors pick the pair with the smallest midline
+    offset. Previously we picked the largest qualifying gap, which let a wide
+    pair of grid lines or distant duct walls win over the actual duct around
+    the callout."""
     cx = 0.5 * (callout_bbox[0] + callout_bbox[2])
     cy = 0.5 * (callout_bbox[1] + callout_bbox[3])
 
@@ -547,34 +648,53 @@ def _infer_geometry(
     if min_gap >= max_gap:
         return None
 
-    nearby: list[tuple[dict[str, float], float]] = []
+    nearby: list[dict[str, float]] = []
     for ln in lines:
         lcx = 0.5 * (ln["x0"] + ln["x1"])
         lcy = 0.5 * (ln["top"] + ln["bottom"])
         d = math.hypot(lcx - cx, lcy - cy)
         if d <= _GEOMETRY_SEARCH_RADIUS:
-            nearby.append((ln, _line_angle_deg(ln)))
+            nearby.append(ln)
 
-    best: tuple[float, dict[str, float], dict[str, float]] | None = None
+    best: tuple[float, float, dict[str, float], dict[str, float]] | None = None
     for i in range(len(nearby)):
-        a, ang_a = nearby[i]
+        a = nearby[i]
+        sa = _signed_perp(a, cx, cy)
+        dax = a["x1"] - a["x0"]
+        day = a["bottom"] - a["top"]
         for j in range(i + 1, len(nearby)):
-            b, ang_b = nearby[j]
-            diff = abs(ang_a - ang_b)
-            diff = min(diff, 180.0 - diff)
-            if diff > _PARALLEL_TOL_DEG:
+            b = nearby[j]
+            dbx = b["x1"] - b["x0"]
+            dby = b["bottom"] - b["top"]
+            # Parallel check (also covers anti-parallel — addressed below).
+            cross = dax * dby - day * dbx
+            norm_a = math.hypot(dax, day)
+            norm_b = math.hypot(dbx, dby)
+            if norm_a == 0 or norm_b == 0:
                 continue
-            gap = _perpendicular_distance(a, b)
+            sin_angle = abs(cross) / (norm_a * norm_b)
+            if sin_angle > math.sin(math.radians(_PARALLEL_TOL_DEG)):
+                continue
+            # Align b's signed perp to a's directed sense so the values are
+            # comparable. Anti-parallel direction means we have to flip sb.
+            sb = _signed_perp(b, cx, cy)
+            if dax * dbx + day * dby < 0:
+                sb = -sb
+            gap = abs(sa - sb)
             if gap < min_gap or gap > max_gap:
                 continue
-            # Outer-wall preference: keep the largest qualifying gap.
-            if best is None or gap > best[0]:
-                best = (gap, a, b)
+            # Distance from the callout to the wall pair's midline. Zero means
+            # the callout sits exactly between the two walls.
+            midline_dist = abs(sa + sb) / 2.0
+            if midline_dist > max(gap / 2.0, _MIDLINE_TOL_PT):
+                continue
+            if best is None or midline_dist < best[0]:
+                best = (midline_dist, gap, a, b)
 
     if best is None:
         return None
 
-    drawn_pts, a, b = best
+    _, drawn_pts, a, b = best
     wall_pair = {
         "a": {"x0": a["x0"], "top": a["top"], "x1": a["x1"], "bottom": a["bottom"]},
         "b": {"x0": b["x0"], "top": b["top"], "x1": b["x1"], "bottom": b["bottom"]},
@@ -594,44 +714,69 @@ def detect_scale_callouts(
     pdf_bytes: bytes,
     page_number: int,
     crop_bbox: BBox,
-    dpi: int = 600,
     black_threshold: float = 0.05,
 ) -> dict[str, Any]:
     """Detect diameter callouts in `crop_bbox` and infer a drawing scale.
 
-    Returns the payload described in the API contract; the caller maps it to a
-    Pydantic response model.
+    Pipeline:
+      1. Vector pass — pull every black rectangle in the crop, filter to
+         callout-sized boxes (small, elongated), dedupe.
+      2. OCR pass — render each candidate at high DPI and OCR with PSM 7.
+         Tiny, clean crops dramatically outperform sparse OCR on the whole
+         crop, and unrelated black ink in the page can't trigger a false
+         positive because we only OCR inside callout-shaped boxes.
+      3. Geometry pass — for each decoded callout, find the duct wall pair
+         and derive a per-callout pts/in.
+      4. Aggregation — band-mean across callouts (outliers dropped).
+
+    Returns the payload described in the API contract; the caller maps it to
+    a Pydantic response model.
     """
+    if page_number < 1:
+        raise ValueError(f"page_number must be >= 1, got {page_number}")
+
+    lines, all_rects = _load_page_lines_and_rects(
+        pdf_bytes, page_number, crop_bbox, black_threshold
+    )
+    candidates = _dedupe_boxes(_filter_callout_candidate_boxes(all_rects))
+    print(
+        f"[detect-scale] {len(all_rects)} rects in crop → "
+        f"{len(candidates)} callout candidates"
+    )
+
     pdf = pdfium.PdfDocument(pdf_bytes)
     try:
         page_count = len(pdf)
-        if not (1 <= page_number <= page_count):
-            raise ValueError(f"page_number {page_number} out of range (1..{page_count})")
-        img = _render_crop(pdf, page_number - 1, crop_bbox, dpi)
+        if page_number > page_count:
+            raise ValueError(
+                f"page_number {page_number} out of range (1..{page_count})"
+            )
+        page_index = page_number - 1
+        decoded: list[tuple[dict[str, Any], dict[str, float]]] = []
+        for box in candidates:
+            res = _ocr_callout_box(pdf, page_index, box, black_threshold)
+            if res is None:
+                continue
+            text, diameter_in, conf, text_bbox = res
+            decoded.append(
+                (
+                    {
+                        "text": text,
+                        "raw_text": text,
+                        "diameter_in": diameter_in,
+                        "confidence": conf,
+                        "bbox": text_bbox,
+                    },
+                    box,
+                )
+            )
     finally:
         pdf.close()
-
-    img = _strip_non_black(img, black_threshold)
-    raw_callouts = _ocr_callouts(img, crop_bbox, dpi)
-    lines, rects = _load_page_lines_and_rects(
-        pdf_bytes, page_number, crop_bbox, black_threshold
-    )
-    print(f"[detect-scale] {len(rects)} rectangles in crop")
-
-    # Keep only callouts whose centre falls inside a pdfplumber-detected
-    # rectangle. Engineering-drawing callouts are boxed; loose text like the
-    # `10"-0"` architectural-scale label is not.
-    boxed: list[tuple[dict[str, Any], dict[str, float]]] = []
-    for c in raw_callouts:
-        rect = _enclosing_rect(c["bbox"], rects)
-        if rect is None:
-            print(f"[detect-scale] drop unboxed: {c['raw_text']!r}")
-            continue
-        boxed.append((c, rect))
+    print(f"[detect-scale] {len(decoded)} callouts decoded")
 
     out_callouts: list[dict[str, Any]] = []
     scales: list[float] = []
-    for idx, (c, rect) in enumerate(boxed, start=1):
+    for idx, (c, rect) in enumerate(decoded, start=1):
         geo = _infer_geometry(c["bbox"], c["diameter_in"], lines)
         if geo is not None:
             duct_bbox, drawn_pts, scale, wall_pairs = geo
@@ -669,8 +814,8 @@ def detect_scale_callouts(
 
     return {
         "page_number": page_number,
-        "dpi": dpi,
+        "dpi": _BOX_OCR_DPI,
         "callouts": out_callouts,
-        "drawing_scale_pts_per_inch": median(scales) if scales else None,
+        "drawing_scale_pts_per_inch": _aggregate_scale(scales),
         "callout_count": len(out_callouts),
     }
