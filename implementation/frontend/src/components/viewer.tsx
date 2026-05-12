@@ -38,6 +38,7 @@ import {
   formatScale,
   hexLuma,
   passesRectAspect,
+  rectSideLengthsPts,
   shiftElement,
   shiftScaleResponse,
   type CropRegion,
@@ -99,6 +100,7 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
     word: false,
   });
   const [showLabels, setShowLabels] = useState(false);
+  const [showMeasurements, setShowMeasurements] = useState(false);
   const [search, setSearch] = useState("");
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -206,6 +208,41 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
     for (const el of displayElements) m.set(el.id, el);
     return m;
   }, [displayElements]);
+
+  const ptsPerInch = currentScale?.drawing_scale_pts_per_inch ?? null;
+
+  // Auto-disable Measure when the current page has no scale (e.g. user
+  // navigated to an undetected page); avoids a stale overlay.
+  useEffect(() => {
+    if (!ptsPerInch && showMeasurements) setShowMeasurements(false);
+  }, [ptsPerInch, showMeasurements]);
+
+  const measurableElements = useMemo(
+    () =>
+      displayElements.filter((el) => {
+        if (
+          el.type !== "rect" &&
+          el.type !== "rect_curve" &&
+          el.type !== "rect_partial"
+        ) {
+          return false;
+        }
+        // Use centre-inside-crop, not fully-inside-crop — large ducts often
+        // extend right to (or just past) the crop edges and would otherwise
+        // disappear from the overlay.
+        const ccx = 0.5 * (el.x0 + el.x1);
+        const ccy = 0.5 * (el.top + el.bottom);
+        return ccx >= 0 && ccx <= displayPageW && ccy >= 0 && ccy <= displayPageH;
+      }),
+    [displayElements, displayPageW, displayPageH],
+  );
+
+  // Clicks in the measurement overlay should just toggle the selection, not
+  // pan/zoom — the user wants to compare the labelled dimensions against the
+  // drawing, which is hard when the view jumps under them.
+  const onMeasureSelect = useCallback((id: string) => {
+    setHighlightedId((prev) => (prev === id ? null : id));
+  }, []);
 
   // Fetch the debug preprocessed SVG (cropped + non-black elements stripped).
   // Debounced so the threshold slider doesn't fire a request on every tick.
@@ -581,6 +618,17 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
               onRun={detectScale}
             />
             <Button
+              variant={showMeasurements ? "default" : "outline"}
+              size="sm"
+              onClick={() => setShowMeasurements((v) => !v)}
+              disabled={!ptsPerInch}
+              aria-label="Toggle measurements"
+              title={ptsPerInch ? "Toggle rectangle dimensions" : "Detect scale first"}
+            >
+              <Ruler />
+              Measure
+            </Button>
+            <Button
               variant={debugOpen ? "default" : "outline"}
               size="sm"
               onClick={() => setDebugOpen((v) => !v)}
@@ -656,6 +704,19 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
                     pageWidth={render.width}
                     pageHeight={render.height}
                     result={displayScale}
+                  />
+                )}
+                {showMeasurements && ptsPerInch && (
+                  <MeasurementsOverlay
+                    elements={measurableElements}
+                    scale={baseScale}
+                    ptsPerInch={ptsPerInch}
+                    pageWidth={render.width}
+                    pageHeight={render.height}
+                    highlightedId={highlightedId}
+                    hoveredId={hoveredId}
+                    onHover={setHoveredId}
+                    onSelect={onMeasureSelect}
                   />
                 )}
               </div>
@@ -1047,6 +1108,229 @@ function CalloutOverlay({
         );
       })}
     </svg>
+  );
+}
+
+type MeasurementsOverlayProps = {
+  elements: Element[];
+  scale: number;
+  ptsPerInch: number;
+  pageWidth: number;
+  pageHeight: number;
+  highlightedId: string | null;
+  hoveredId: string | null;
+  onHover: (id: string | null) => void;
+  onSelect: (id: string) => void;
+};
+
+// Live overlay laid on top of the canvas-rendered elements: every visible
+// rectangle gets a translucent click target plus a `W"×H"` label. Lives inside
+// the transform layer so it pans/zooms with the PDF.
+//
+// Pointer events strategy: the SVG root is `pointer-events: none` so empty
+// space falls through to the stage's pan handler; each shape group sets
+// `pointer-events: all` so it captures clicks only on the rectangle itself.
+function MeasurementsOverlay({
+  elements,
+  scale,
+  ptsPerInch,
+  pageWidth,
+  pageHeight,
+  highlightedId,
+  hoveredId,
+  onHover,
+  onSelect,
+}: MeasurementsOverlayProps) {
+  const activeId = highlightedId ?? hoveredId;
+  const selectedEl = highlightedId
+    ? elements.find((e) => e.id === highlightedId) ?? null
+    : null;
+  return (
+    <svg
+      className="absolute left-0 top-0"
+      width={pageWidth}
+      height={pageHeight}
+      viewBox={`0 0 ${pageWidth} ${pageHeight}`}
+      style={{ pointerEvents: "none", overflow: "hidden" }}
+    >
+      {elements.map((el) => (
+        <MeasurementItem
+          key={el.id}
+          el={el}
+          scale={scale}
+          ptsPerInch={ptsPerInch}
+          isActive={el.id === activeId}
+          onHover={onHover}
+          onSelect={onSelect}
+        />
+      ))}
+      {selectedEl && (
+        <SelectionCard
+          el={selectedEl}
+          scale={scale}
+          ptsPerInch={ptsPerInch}
+          pageWidth={pageWidth}
+        />
+      )}
+    </svg>
+  );
+}
+
+function MeasurementItem({
+  el,
+  scale,
+  ptsPerInch,
+  isActive,
+  onHover,
+  onSelect,
+}: {
+  el: Element;
+  scale: number;
+  ptsPerInch: number;
+  isActive: boolean;
+  onHover: (id: string | null) => void;
+  onSelect: (id: string) => void;
+}) {
+  const sides = rectSideLengthsPts(el);
+  if (!sides) return null;
+  const wIn = sides.w / ptsPerInch;
+  const hIn = sides.h / ptsPerInch;
+
+  const cx = ((el.x0 + el.x1) / 2) * scale;
+  const cy = ((el.top + el.bottom) / 2) * scale;
+  const bboxW = (el.x1 - el.x0) * scale;
+  const bboxH = (el.bottom - el.top) * scale;
+  const minDim = Math.min(bboxW, bboxH);
+  // Skip labels for rects too small to fit them; the hit shape stays so the
+  // user can still click in to inspect.
+  const showLabel = minDim > 16;
+  const fontSize = Math.min(Math.max(8, minDim * 0.22), 13);
+
+  const baseStroke = isActive ? "#16a34a" : "rgba(34, 197, 94, 0.55)";
+  const baseFill = isActive ? "rgba(34, 197, 94, 0.22)" : "rgba(34, 197, 94, 0.05)";
+  const strokeWidth = isActive ? 2 : 1;
+
+  // Always render the axis-aligned bbox, even for rotated rect_curves.
+  // `corners` from the extractor are mirrored vertically due to a double
+  // Y-flip there (pdfplumber's pts come pre-converted to top-left, then
+  // extractor.py does `page_h - y` again). Rendering the polygon from those
+  // corners puts the shape at the wrong place; bboxes are unaffected since
+  // they come from a separate pdfplumber attribute. Dimensions on the label
+  // still use corner *distances*, which are translation-invariant.
+  const hitShape = (
+    <rect
+      x={el.x0 * scale}
+      y={el.top * scale}
+      width={bboxW}
+      height={bboxH}
+      fill={baseFill}
+      stroke={baseStroke}
+      strokeWidth={strokeWidth}
+    />
+  );
+
+  return (
+    <g
+      data-role="no-pan"
+      style={{ cursor: "pointer", pointerEvents: "all" }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect(el.id);
+      }}
+      onMouseEnter={() => onHover(el.id)}
+      onMouseLeave={() => onHover(null)}
+    >
+      {hitShape}
+      {showLabel && (
+        <text
+          x={cx}
+          y={cy}
+          fontSize={fontSize}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          fill="#15803d"
+          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+          fontWeight={isActive ? 600 : 500}
+          style={{ paintOrder: "stroke", stroke: "white", strokeWidth: 3, pointerEvents: "none" }}
+        >
+          {wIn.toFixed(1)}″×{hIn.toFixed(1)}″
+        </text>
+      )}
+    </g>
+  );
+}
+
+// Popup anchored above (or below, if no room) the selected rectangle. Shows
+// the dimensions in inches and the raw PDF-point sides — the user wanted a
+// visible "verify this" panel rather than a tiny inline label they have to
+// hunt for.
+function SelectionCard({
+  el,
+  scale,
+  ptsPerInch,
+  pageWidth,
+}: {
+  el: Element;
+  scale: number;
+  ptsPerInch: number;
+  pageWidth: number;
+}) {
+  const sides = rectSideLengthsPts(el);
+  if (!sides) return null;
+  const wIn = sides.w / ptsPerInch;
+  const hIn = sides.h / ptsPerInch;
+  const elTop = el.top * scale;
+  const elBottom = el.bottom * scale;
+  const elCx = ((el.x0 + el.x1) / 2) * scale;
+  const cardW = 168;
+  const cardH = 60;
+  // Default: above the rect with a 12px gap. Flip below if there's no room
+  // at the top.
+  const placeAbove = elTop > cardH + 20;
+  const cardY = placeAbove ? elTop - cardH - 12 : elBottom + 12;
+  const cardX = Math.max(8, Math.min(pageWidth - cardW - 8, elCx - cardW / 2));
+  return (
+    <g style={{ pointerEvents: "none" }}>
+      <rect
+        x={cardX}
+        y={cardY}
+        width={cardW}
+        height={cardH}
+        rx={6}
+        fill="white"
+        stroke="#16a34a"
+        strokeWidth={1.5}
+        style={{ filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.18))" }}
+      />
+      <text
+        x={cardX + 10}
+        y={cardY + 18}
+        fontSize={10}
+        fill="#64748b"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+      >
+        {el.id}
+      </text>
+      <text
+        x={cardX + 10}
+        y={cardY + 36}
+        fontSize={15}
+        fontWeight={600}
+        fill="#0f172a"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+      >
+        {wIn.toFixed(1)}″ × {hIn.toFixed(1)}″
+      </text>
+      <text
+        x={cardX + 10}
+        y={cardY + 52}
+        fontSize={10}
+        fill="#64748b"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+      >
+        {sides.w.toFixed(1)}pt × {sides.h.toFixed(1)}pt
+      </text>
+    </g>
   );
 }
 

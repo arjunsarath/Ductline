@@ -66,26 +66,17 @@ _MIN_CALLOUT_ASPECT = 1.4
 # pts/in values within ±10% of the median, mean the survivors.
 _SCALE_BAND_PCT = 0.10
 
-# Search window around a callout centre for candidate duct walls (PDF points).
-# 120pt ≈ 1.7 inches at 1:1 — wide enough for the longest duct labels seen,
-# narrow enough to avoid grabbing the neighbouring duct.
+# Search window around a callout centre for candidate duct rectangles (PDF
+# points). 120pt ≈ 1.7 inches at 1:1 — wide enough for the longest duct labels
+# seen, narrow enough to avoid grabbing the neighbouring duct.
 _GEOMETRY_SEARCH_RADIUS = 120.0
-# ±5° tolerance pairs up walls drawn slightly off-axis (CAD snap drift).
-_PARALLEL_TOL_DEG = 5.0
-# A duct wall pair under this is almost certainly a leader-line arrowhead,
-# not the duct itself.
-_MIN_WALL_GAP = 3.0
 # Plausible drawing scales for HVAC plans: 0.3 to 5 PDF pts per real-world inch.
 # 5 pts/in ≈ 1:14 (drawings rarely go larger than 1:16 for whole-floor plans);
-# 0.3 ≈ 1:240. A detected gap must fit inside this range when divided by the
-# declared diameter — kills pairs grabbed from grid/border lines far across the page.
+# 0.3 ≈ 1:240. The duct rect's shorter side, divided by the declared diameter,
+# must fall inside this range — kills equipment boxes, frames, and callout
+# boxes that happen to sit near the callout but aren't ducts.
 _MIN_SCALE_PTS_PER_IN = 0.3
 _MAX_SCALE_PTS_PER_IN = 5.0
-# A real duct's centreline runs through (or very near) its callout. We require
-# the wall-pair midline to be within `max(gap/2, MIDLINE_TOL_PT)` of the
-# callout centre — gap/2 means "callout is between the walls", and the floor
-# keeps the constraint reasonable for tiny ducts where gap/2 would be < 3pt.
-_MIDLINE_TOL_PT = 10.0
 
 
 def _normalise_callout(raw: str) -> tuple[str, float] | None:
@@ -610,104 +601,114 @@ def _load_page_lines_and_rects(
     return lines, rects
 
 
-def _signed_perp(line: dict[str, float], px: float, py: float) -> float:
-    """Signed perpendicular distance from (px, py) to the infinite line through
-    line's start→end. Sign follows the line's directed sense — meaningful only
-    relative to another value computed against the SAME line, or relative to a
-    second line whose direction has been aligned (see `_infer_geometry`)."""
-    x0, y0 = line["x0"], line["top"]
-    x1, y1 = line["x1"], line["bottom"]
-    dx, dy = x1 - x0, y1 - y0
-    norm = math.hypot(dx, dy)
-    if norm == 0:
-        return 0.0
-    return (dx * (py - y0) - dy * (px - x0)) / norm
+def _same_rect(a: dict[str, float], b: dict[str, float], tol: float = 1.0) -> bool:
+    return (
+        abs(a["x0"] - b["x0"]) < tol
+        and abs(a["top"] - b["top"]) < tol
+        and abs(a["x1"] - b["x1"]) < tol
+        and abs(a["bottom"] - b["bottom"]) < tol
+    )
+
+
+def _wall_pair_from_rect(
+    rect: dict[str, float], drawn_pts: float
+) -> dict[str, Any]:
+    """Synthesise a wall pair from a duct rectangle's two long edges. Used by
+    the overlay to draw the measurement line so the user can see WHICH rect
+    the algorithm chose to associate with each callout."""
+    x0, top, x1, bottom = rect["x0"], rect["top"], rect["x1"], rect["bottom"]
+    w = x1 - x0
+    h = bottom - top
+    if w >= h:
+        # Horizontal duct: the two long edges are the top and bottom of the
+        # rect, perpendicular to the diameter direction.
+        a = {"x0": x0, "top": top, "x1": x1, "bottom": top}
+        b = {"x0": x0, "top": bottom, "x1": x1, "bottom": bottom}
+    else:
+        # Vertical duct: the left and right edges.
+        a = {"x0": x0, "top": top, "x1": x0, "bottom": bottom}
+        b = {"x0": x1, "top": top, "x1": x1, "bottom": bottom}
+    return {"a": a, "b": b, "distance_pts": drawn_pts}
 
 
 def _infer_geometry(
     callout_bbox: BBox,
     diameter_in: float,
-    lines: list[dict[str, float]],
+    all_rects: list[dict[str, float]],
+    exclude_rect: dict[str, float],
 ) -> tuple[BBox, float, float, list[dict[str, Any]]] | None:
-    """Return (duct_bbox, drawn_diameter_pts, scale_pts_per_inch, wall_pairs)
-    or None.
+    """Find the duct rectangle for this callout and read its drawn diameter
+    off the rect's shorter side. Returns (duct_bbox, drawn_pts, scale,
+    wall_pairs) or None.
 
-    Wall-pair selection: pair up nearby parallel lines, keep only those whose
-    midline is within `max(gap/2, MIDLINE_TOL_PT)` of the callout centre (i.e.
-    the callout actually sits between the walls, not somewhere off to the
-    side), and among the survivors pick the pair with the smallest midline
-    offset. Previously we picked the largest qualifying gap, which let a wide
-    pair of grid lines or distant duct walls win over the actual duct around
-    the callout."""
+    Two-stage selection:
+      1. ASSOCIATED — rects whose bbox, expanded by one callout's worth of
+         padding in each direction, contains the callout's centre. This
+         picks up the duct whether the callout sits inside it (callout
+         centred on the duct) or just outside it (leader-line layout).
+      2. NEAR       — fallback for callouts with no associated rect: pick
+         the rect whose centre is closest, ties broken by larger area.
+
+    Within ASSOCIATED we always prefer the **largest** qualifying
+    rectangle by area. Real ducts are long, thick rectangles; the false
+    positives we want to avoid (dimension stubs, arrowhead boxes, leader
+    marks) are short and narrow, so largest-area is what disambiguates the
+    duct from those near-callout artefacts.
+
+    `exclude_rect` is the callout's own bordered box; it's always
+    ASSOCIATED and would win otherwise."""
     cx = 0.5 * (callout_bbox[0] + callout_bbox[2])
     cy = 0.5 * (callout_bbox[1] + callout_bbox[3])
+    cw = callout_bbox[2] - callout_bbox[0]
+    ch = callout_bbox[3] - callout_bbox[1]
+    # Expansion = one callout's worth in each direction. With a 30×15 callout
+    # this admits ducts up to ~30pt away from the callout's bbox — enough to
+    # cover typical leader-line layouts without sweeping in unrelated rects.
+    expansion = max(cw, ch)
 
-    # Diameter-specific gap window. Capped by the search radius too.
-    min_gap = max(_MIN_WALL_GAP, _MIN_SCALE_PTS_PER_IN * diameter_in)
-    max_gap = min(_GEOMETRY_SEARCH_RADIUS, _MAX_SCALE_PTS_PER_IN * diameter_in)
-    if min_gap >= max_gap:
+    min_drawn = _MIN_SCALE_PTS_PER_IN * diameter_in
+    max_drawn = min(_GEOMETRY_SEARCH_RADIUS, _MAX_SCALE_PTS_PER_IN * diameter_in)
+    if min_drawn >= max_drawn:
         return None
 
-    nearby: list[dict[str, float]] = []
-    for ln in lines:
-        lcx = 0.5 * (ln["x0"] + ln["x1"])
-        lcy = 0.5 * (ln["top"] + ln["bottom"])
-        d = math.hypot(lcx - cx, lcy - cy)
+    associated: list[tuple[float, dict[str, float]]] = []
+    nearby: list[tuple[float, float, dict[str, float]]] = []
+
+    for r in all_rects:
+        if _same_rect(r, exclude_rect):
+            continue
+        w = r["x1"] - r["x0"]
+        h = r["bottom"] - r["top"]
+        if w <= 0 or h <= 0:
+            continue
+        shorter = min(w, h)
+        if not (min_drawn <= shorter <= max_drawn):
+            continue
+        area = w * h
+
+        if (r["x0"] - expansion) <= cx <= (r["x1"] + expansion) \
+                and (r["top"] - expansion) <= cy <= (r["bottom"] + expansion):
+            associated.append((area, r))
+            continue
+
+        rcx = 0.5 * (r["x0"] + r["x1"])
+        rcy = 0.5 * (r["top"] + r["bottom"])
+        d = math.hypot(rcx - cx, rcy - cy)
         if d <= _GEOMETRY_SEARCH_RADIUS:
-            nearby.append(ln)
+            nearby.append((d, area, r))
 
-    best: tuple[float, float, dict[str, float], dict[str, float]] | None = None
-    for i in range(len(nearby)):
-        a = nearby[i]
-        sa = _signed_perp(a, cx, cy)
-        dax = a["x1"] - a["x0"]
-        day = a["bottom"] - a["top"]
-        for j in range(i + 1, len(nearby)):
-            b = nearby[j]
-            dbx = b["x1"] - b["x0"]
-            dby = b["bottom"] - b["top"]
-            # Parallel check (also covers anti-parallel — addressed below).
-            cross = dax * dby - day * dbx
-            norm_a = math.hypot(dax, day)
-            norm_b = math.hypot(dbx, dby)
-            if norm_a == 0 or norm_b == 0:
-                continue
-            sin_angle = abs(cross) / (norm_a * norm_b)
-            if sin_angle > math.sin(math.radians(_PARALLEL_TOL_DEG)):
-                continue
-            # Align b's signed perp to a's directed sense so the values are
-            # comparable. Anti-parallel direction means we have to flip sb.
-            sb = _signed_perp(b, cx, cy)
-            if dax * dbx + day * dby < 0:
-                sb = -sb
-            gap = abs(sa - sb)
-            if gap < min_gap or gap > max_gap:
-                continue
-            # Distance from the callout to the wall pair's midline. Zero means
-            # the callout sits exactly between the two walls.
-            midline_dist = abs(sa + sb) / 2.0
-            if midline_dist > max(gap / 2.0, _MIDLINE_TOL_PT):
-                continue
-            if best is None or midline_dist < best[0]:
-                best = (midline_dist, gap, a, b)
-
-    if best is None:
+    if associated:
+        rect = max(associated, key=lambda x: x[0])[1]
+    elif nearby:
+        nearby.sort(key=lambda x: (x[0], -x[1]))
+        rect = nearby[0][2]
+    else:
         return None
 
-    _, drawn_pts, a, b = best
-    wall_pair = {
-        "a": {"x0": a["x0"], "top": a["top"], "x1": a["x1"], "bottom": a["bottom"]},
-        "b": {"x0": b["x0"], "top": b["top"], "x1": b["x1"], "bottom": b["bottom"]},
-        "distance_pts": drawn_pts,
-    }
-    duct_bbox: BBox = (
-        min(a["x0"], b["x0"]),
-        min(a["top"], b["top"]),
-        max(a["x1"], b["x1"]),
-        max(a["bottom"], b["bottom"]),
-    )
+    drawn_pts = min(rect["x1"] - rect["x0"], rect["bottom"] - rect["top"])
+    duct_bbox: BBox = (rect["x0"], rect["top"], rect["x1"], rect["bottom"])
     scale = drawn_pts / diameter_in
-    return duct_bbox, drawn_pts, scale, [wall_pair]
+    return duct_bbox, drawn_pts, scale, [_wall_pair_from_rect(rect, drawn_pts)]
 
 
 def detect_scale_callouts(
@@ -735,7 +736,7 @@ def detect_scale_callouts(
     if page_number < 1:
         raise ValueError(f"page_number must be >= 1, got {page_number}")
 
-    lines, all_rects = _load_page_lines_and_rects(
+    _, all_rects = _load_page_lines_and_rects(
         pdf_bytes, page_number, crop_bbox, black_threshold
     )
     candidates = _dedupe_boxes(_filter_callout_candidate_boxes(all_rects))
@@ -777,7 +778,7 @@ def detect_scale_callouts(
     out_callouts: list[dict[str, Any]] = []
     scales: list[float] = []
     for idx, (c, rect) in enumerate(decoded, start=1):
-        geo = _infer_geometry(c["bbox"], c["diameter_in"], lines)
+        geo = _infer_geometry(c["bbox"], c["diameter_in"], all_rects, rect)
         if geo is not None:
             duct_bbox, drawn_pts, scale, wall_pairs = geo
             scales.append(scale)

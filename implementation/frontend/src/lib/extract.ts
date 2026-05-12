@@ -216,29 +216,35 @@ export function shiftScaleResponse(s: ScaleResponse, dx: number, dy: number): Sc
  *  (title-block cells, scale-bar boxes, equipment glyphs) get dropped. */
 export const MIN_RECT_ASPECT = 1.4;
 
-/** True if a rect/rect_curve is elongated enough to keep. Non-rectangle types
- *  pass through unchanged. For `rect_curve` we use the rotated side lengths
- *  (via `corners`) so a thin duct at an angle isn't misjudged by its bbox. */
-export function passesRectAspect(el: Element, minRatio = MIN_RECT_ASPECT): boolean {
-  let w: number;
-  let h: number;
-  if (el.type === "rect") {
-    w = el.x1 - el.x0;
-    h = el.bottom - el.top;
-  } else if (el.type === "rect_curve") {
+/** The two side lengths (in PDF points) of a rect-family element. For
+ *  `rect_curve` with corners we use the rotated sides so a duct drawn at an
+ *  angle reports its true dimensions rather than its bounding-box. Returns
+ *  null for non-rectangle types. */
+export function rectSideLengthsPts(el: Element): { w: number; h: number } | null {
+  if (el.type === "rect" || el.type === "rect_partial" || el.type === "inferred_rect") {
+    return { w: el.x1 - el.x0, h: el.bottom - el.top };
+  }
+  if (el.type === "rect_curve") {
     if (el.corners.length === 4) {
       const [a, b, c] = el.corners;
-      w = Math.hypot(a[0] - b[0], a[1] - b[1]);
-      h = Math.hypot(b[0] - c[0], b[1] - c[1]);
-    } else {
-      w = el.x1 - el.x0;
-      h = el.bottom - el.top;
+      return {
+        w: Math.hypot(a[0] - b[0], a[1] - b[1]),
+        h: Math.hypot(b[0] - c[0], b[1] - c[1]),
+      };
     }
-  } else {
-    return true;
+    return { w: el.x1 - el.x0, h: el.bottom - el.top };
   }
-  if (w <= 0 || h <= 0) return false;
-  return Math.max(w / h, h / w) >= minRatio;
+  return null;
+}
+
+/** True if a rect/rect_curve is elongated enough to keep. Non-rectangle types
+ *  pass through unchanged. */
+export function passesRectAspect(el: Element, minRatio = MIN_RECT_ASPECT): boolean {
+  if (el.type !== "rect" && el.type !== "rect_curve") return true;
+  const sides = rectSideLengthsPts(el);
+  if (!sides) return false;
+  if (sides.w <= 0 || sides.h <= 0) return false;
+  return Math.max(sides.w / sides.h, sides.h / sides.w) >= minRatio;
 }
 
 /** Per-element colour (stroke for lines, stroke-or-fill for rects, fill for chars). */
