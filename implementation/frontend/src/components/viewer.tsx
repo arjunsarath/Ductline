@@ -37,6 +37,7 @@ import {
   elementText,
   formatScale,
   hexLuma,
+  passesRectAspect,
   shiftElement,
   shiftScaleResponse,
   type CropRegion,
@@ -145,6 +146,7 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
     for (const el of currentPage.elements) {
       const col = elementColor(el);
       if (col && hexLuma(col) > blackThreshold) continue;
+      if (!passesRectAspect(el)) continue;
       c[el.type] += 1;
     }
     return c;
@@ -160,6 +162,7 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
       // into the preprocessed PDF the user is looking at.
       const c = elementColor(el);
       if (c && hexLuma(c) > blackThreshold) return false;
+      if (!passesRectAspect(el)) return false;
       if (target && (!c || c.toLowerCase() !== target)) return false;
       if (!q) return true;
       if (el.id.toLowerCase().includes(q)) return true;

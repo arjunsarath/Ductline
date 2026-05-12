@@ -212,6 +212,35 @@ export function shiftScaleResponse(s: ScaleResponse, dx: number, dy: number): Sc
   };
 }
 
+/** Minimum side ratio for a rectangle to plausibly be a duct. Squarer shapes
+ *  (title-block cells, scale-bar boxes, equipment glyphs) get dropped. */
+export const MIN_RECT_ASPECT = 1.4;
+
+/** True if a rect/rect_curve is elongated enough to keep. Non-rectangle types
+ *  pass through unchanged. For `rect_curve` we use the rotated side lengths
+ *  (via `corners`) so a thin duct at an angle isn't misjudged by its bbox. */
+export function passesRectAspect(el: Element, minRatio = MIN_RECT_ASPECT): boolean {
+  let w: number;
+  let h: number;
+  if (el.type === "rect") {
+    w = el.x1 - el.x0;
+    h = el.bottom - el.top;
+  } else if (el.type === "rect_curve") {
+    if (el.corners.length === 4) {
+      const [a, b, c] = el.corners;
+      w = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      h = Math.hypot(b[0] - c[0], b[1] - c[1]);
+    } else {
+      w = el.x1 - el.x0;
+      h = el.bottom - el.top;
+    }
+  } else {
+    return true;
+  }
+  if (w <= 0 || h <= 0) return false;
+  return Math.max(w / h, h / w) >= minRatio;
+}
+
 /** Per-element colour (stroke for lines, stroke-or-fill for rects, fill for chars). */
 export function elementColor(el: Element): string | null {
   if (el.type === "line") return el.stroke;
