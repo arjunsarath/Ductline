@@ -214,7 +214,7 @@ export function shiftScaleResponse(s: ScaleResponse, dx: number, dy: number): Sc
 
 /** Minimum side ratio for a rectangle to plausibly be a duct. Squarer shapes
  *  (title-block cells, scale-bar boxes, equipment glyphs) get dropped. */
-export const MIN_RECT_ASPECT = 1.4;
+export const MIN_RECT_ASPECT = 1.2;
 
 /** The two side lengths (in PDF points) of a rect-family element. For
  *  `rect_curve` with corners we use the rotated sides so a duct drawn at an
@@ -245,6 +245,43 @@ export function passesRectAspect(el: Element, minRatio = MIN_RECT_ASPECT): boole
   if (!sides) return false;
   if (sides.w <= 0 || sides.h <= 0) return false;
   return Math.max(sides.w / sides.h, sides.h / sides.w) >= minRatio;
+}
+
+/** Real-world size thresholds for the duct-size cleanup toggle. A rect with
+ *  any side under `MIN_DUCT_SIDE_INCHES` is too small to be a duct (dimension
+ *  stub, arrowhead, callout cell); a rect with area over `MAX_DUCT_AREA_SQ_IN`
+ *  is too large (title block, page border, full-room equipment outline). */
+export const MIN_DUCT_SIDE_INCHES = 3.0;
+export const MAX_DUCT_AREA_SQ_IN = 8000;
+
+/** True if both sides of a rect/rect_curve are at least `minInches` long
+ *  given the drawing scale. Non-rectangle types pass through unchanged. */
+export function passesMinSideInches(
+  el: Element,
+  ptsPerInch: number,
+  minInches: number = MIN_DUCT_SIDE_INCHES,
+): boolean {
+  if (el.type !== "rect" && el.type !== "rect_curve") return true;
+  const sides = rectSideLengthsPts(el);
+  if (!sides) return false;
+  const minPts = minInches * ptsPerInch;
+  return sides.w >= minPts && sides.h >= minPts;
+}
+
+/** True if the rect/rect_curve's real-world area is at most `maxSqIn`. Uses
+ *  side lengths (so a rotated rect_curve gets its true area, not its
+ *  axis-aligned bbox). Non-rectangle types pass through unchanged. */
+export function passesMaxAreaInches(
+  el: Element,
+  ptsPerInch: number,
+  maxSqIn: number = MAX_DUCT_AREA_SQ_IN,
+): boolean {
+  if (el.type !== "rect" && el.type !== "rect_curve") return true;
+  const sides = rectSideLengthsPts(el);
+  if (!sides) return false;
+  const wIn = sides.w / ptsPerInch;
+  const hIn = sides.h / ptsPerInch;
+  return wIn * hIn <= maxSqIn;
 }
 
 /** Per-element colour (stroke for lines, stroke-or-fill for rects, fill for chars). */

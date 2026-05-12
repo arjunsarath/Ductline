@@ -29,6 +29,11 @@ type Props = {
    * the container width (the previous default behavior).
    */
   width?: number;
+  /**
+   * Opacity applied only to the rendered PDF (not to children/overlays).
+   * Defaults to 1. Pure CSS — doesn't trigger a re-render.
+   */
+  pdfOpacity?: number;
   onRender: (info: PdfRenderInfo) => void;
   onLoad: (pageCount: number) => void;
   onError?: (err: Error) => void;
@@ -43,6 +48,7 @@ export default function PdfPage({
   file,
   pageNumber,
   width,
+  pdfOpacity = 1,
   onRender,
   onLoad,
   onError,
@@ -75,37 +81,42 @@ export default function PdfPage({
       style={width !== undefined ? { width } : { width: "100%" }}
     >
       {containerWidth > 0 && (
-        <Document
-          file={file}
-          onLoadSuccess={({ numPages }) => onLoad(numPages)}
-          onLoadError={(err) => onError?.(err)}
-          loading={
-            <div className="p-6 text-sm text-muted-foreground">Loading PDF…</div>
-          }
-          error={
-            <div className="p-6 text-sm text-destructive">
-              Failed to load PDF.
-            </div>
-          }
-        >
-          <Page
-            pageNumber={pageNumber}
-            width={containerWidth}
-            devicePixelRatio={RENDER_DPR}
-            renderAnnotationLayer={false}
-            renderTextLayer={false}
-            onRenderSuccess={(page) =>
-              onRender({
-                width: page.width,
-                height: page.height,
-                // originalWidth/Height are the page's native size in PDF points.
-                pointWidth: page.originalWidth,
-                pointHeight: page.originalHeight,
-              })
+        // Opacity wrapper sits inside the relative container but BEFORE
+        // children, so overlays remain at full opacity while the rendered
+        // PDF dims.
+        <div style={{ opacity: pdfOpacity, transition: "opacity 120ms" }}>
+          <Document
+            file={file}
+            onLoadSuccess={({ numPages }) => onLoad(numPages)}
+            onLoadError={(err) => onError?.(err)}
+            loading={
+              <div className="p-6 text-sm text-muted-foreground">Loading PDF…</div>
             }
-            onRenderError={(err) => onError?.(err)}
-          />
-        </Document>
+            error={
+              <div className="p-6 text-sm text-destructive">
+                Failed to load PDF.
+              </div>
+            }
+          >
+            <Page
+              pageNumber={pageNumber}
+              width={containerWidth}
+              devicePixelRatio={RENDER_DPR}
+              renderAnnotationLayer={false}
+              renderTextLayer={false}
+              onRenderSuccess={(page) =>
+                onRender({
+                  width: page.width,
+                  height: page.height,
+                  // originalWidth/Height are the page's native size in PDF points.
+                  pointWidth: page.originalWidth,
+                  pointHeight: page.originalHeight,
+                })
+              }
+              onRenderError={(err) => onError?.(err)}
+            />
+          </Document>
+        </div>
       )}
       {children}
     </div>

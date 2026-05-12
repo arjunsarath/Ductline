@@ -10,9 +10,9 @@ import {
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
-  Bug,
   ChevronLeft,
   ChevronRight,
+  Eye,
   Maximize2,
   Minus,
   Plus,
@@ -26,9 +26,8 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import type { PdfRenderInfo } from "@/components/pdf-page";
+import PdfPage, { type PdfRenderInfo } from "@/components/pdf-page";
 import ElementOverlay from "@/components/element-overlay";
-import ColorDebugPanel from "@/components/color-debug-panel";
 import {
   ELEMENT_TYPES,
   TYPE_COLORS,
@@ -37,10 +36,10 @@ import {
   elementText,
   formatScale,
   hexLuma,
+  passesMaxAreaInches,
+  passesMinSideInches,
   passesRectAspect,
   rectSideLengthsPts,
-  shiftElement,
-  shiftScaleResponse,
   type CropRegion,
   type Element,
   type ElementType,
@@ -52,14 +51,11 @@ import { cn } from "@/lib/utils";
 type Props = {
   data: ExtractResponse;
   file: File;
+  pdfUrl: string;
   regions: CropRegion[];
+  scaleByPage: Record<number, ScaleResponse>;
   onReset: () => void;
 };
-
-const SCALE_API_URL =
-  process.env.NEXT_PUBLIC_SCALE_API_URL ?? "http://localhost:8000/api/detect-scale";
-const PREPROCESS_API_URL =
-  process.env.NEXT_PUBLIC_PREPROCESS_API_URL ?? "http://localhost:8000/api/preprocess";
 
 type Transform = { scale: number; tx: number; ty: number };
 
@@ -78,13 +74,11 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
-export default function Viewer({ data, file, regions, onReset }: Props) {
-  const [scaleByPage, setScaleByPage] = useState<Record<number, ScaleResponse>>({});
-  const [detectingScale, setDetectingScale] = useState(false);
-  const [debugOpen, setDebugOpen] = useState(false);
-  const [blackThreshold, setBlackThreshold] = useState(0.05);
-  const [highlightedColor, setHighlightedColor] = useState<string | null>(null);
-  const [preprocessedSvg, setPreprocessedSvg] = useState<string | null>(null);
+// Fixed black-ink threshold applied to element-list filtering — matches the
+// value the pipeline used when running detect-scale.
+const BLACK_THRESHOLD = 0.02;
+
+export default function Viewer({ data, pdfUrl, regions, scaleByPage, onReset }: Props) {
   const [pageIdx, setPageIdx] = useState(0);
   // Non-rectangle types (line/char/word/curve) are not user-visible — the
   // filter pane only surfaces the rectangle family. inferred_rect stays
@@ -100,7 +94,6 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
     word: false,
   });
   const [showLabels, setShowLabels] = useState(false);
-  const [showMeasurements, setShowMeasurements] = useState(false);
   const [search, setSearch] = useState("");
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -110,6 +103,11 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
   // only after user motion settles, so wheel/pan stays jitter-free.
   const [rasterWidth, setRasterWidth] = useState(900);
   const [animating, setAnimating] = useState(false);
+  // PdfPage onRender callback gives us the actual rendered dimensions.
+  const [renderInfo, setRenderInfo] = useState<PdfRenderInfo | null>(null);
+  // Slider-controlled opacity for the underlying PDF (0-1). Overlays stay
+  // fully opaque so they pop against a dimmed page.
+  const [pdfOpacity, setPdfOpacity] = useState(1);
 
   const stageRef = useRef<HTMLDivElement>(null);
 
@@ -118,17 +116,14 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
     ? scaleByPage[currentPage.page_number] ?? null
     : null;
 
-  // The preprocessed PDF lives in crop-local coordinates. We translate every
-  // overlay element/callout by -cropOrigin so they line up with the rendered
-  // debug PDF instead of the original page.
+  // We render the full original page; the crop is just an analysis boundary
+  // we draw as an outline so the user knows which area the pipeline saw.
   const cropRegion = useMemo(
     () => (currentPage ? regions.find((r) => r.page === currentPage.page_number) ?? null : null),
     [regions, currentPage],
   );
-  const cropX0 = cropRegion?.x0 ?? 0;
-  const cropTop = cropRegion?.top ?? 0;
-  const displayPageW = cropRegion ? cropRegion.x1 - cropRegion.x0 : currentPage?.width ?? 0;
-  const displayPageH = cropRegion ? cropRegion.bottom - cropRegion.top : currentPage?.height ?? 0;
+  const displayPageW = currentPage?.width ?? 0;
+  const displayPageH = currentPage?.height ?? 0;
 
   const counts = useMemo(() => {
     const c: Record<ElementType, number> = {
@@ -142,30 +137,31 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
       word: 0,
     };
     if (!currentPage) return c;
-    // Always apply the black threshold so the counts reflect what the backend
-    // actually processes. Uncoloured elements (no stroke/fill metadata) pass
-    // through — pdfplumber returns null for the PDF default colour (black).
+    const sp = currentScale?.drawing_scale_pts_per_inch ?? null;
     for (const el of currentPage.elements) {
       const col = elementColor(el);
-      if (col && hexLuma(col) > blackThreshold) continue;
+      if (col && hexLuma(col) > BLACK_THRESHOLD) continue;
       if (!passesRectAspect(el)) continue;
+      if (sp != null && (!passesMinSideInches(el, sp) || !passesMaxAreaInches(el, sp))) {
+        continue;
+      }
       c[el.type] += 1;
     }
     return c;
-  }, [currentPage, blackThreshold]);
+  }, [currentPage, currentScale]);
 
   const visibleElements = useMemo<Element[]>(() => {
     if (!currentPage) return [];
     const q = search.trim().toLowerCase();
-    const target = highlightedColor?.toLowerCase() ?? null;
+    const sp = currentScale?.drawing_scale_pts_per_inch ?? null;
     return currentPage.elements.filter((el) => {
       if (!enabled[el.type]) return false;
-      // Threshold filter is always on — it mirrors what the backend rebuilds
-      // into the preprocessed PDF the user is looking at.
       const c = elementColor(el);
-      if (c && hexLuma(c) > blackThreshold) return false;
+      if (c && hexLuma(c) > BLACK_THRESHOLD) return false;
       if (!passesRectAspect(el)) return false;
-      if (target && (!c || c.toLowerCase() !== target)) return false;
+      if (sp != null && (!passesMinSideInches(el, sp) || !passesMaxAreaInches(el, sp))) {
+        return false;
+      }
       if (!q) return true;
       if (el.id.toLowerCase().includes(q)) return true;
       if (
@@ -176,33 +172,17 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
       }
       return false;
     });
-  }, [currentPage, enabled, search, highlightedColor, blackThreshold]);
+  }, [currentPage, enabled, search, currentScale]);
 
-  // The SVG view has no async-render step (no canvas), so we derive the
-  // render info synchronously instead of waiting for an onRender callback.
-  const render = useMemo<PdfRenderInfo | null>(() => {
-    if (!preprocessedSvg || !displayPageW || !displayPageH) return null;
-    const h = (rasterWidth * displayPageH) / displayPageW;
-    return {
-      width: rasterWidth,
-      height: h,
-      pointWidth: displayPageW,
-      pointHeight: displayPageH,
-    };
-  }, [preprocessedSvg, rasterWidth, displayPageW, displayPageH]);
-
+  // Page render info comes from PdfPage's onRender; clear it when the page
+  // we're rendering changes so we don't briefly show stale overlay dimensions.
+  const render = renderInfo;
   const baseScale = render && displayPageW ? render.width / displayPageW : 1;
 
-  // Translate elements + scale callouts into the preprocessed-PDF's crop-local
-  // coordinate system so the overlays line up.
-  const displayElements = useMemo(
-    () => visibleElements.map((el) => shiftElement(el, -cropX0, -cropTop)),
-    [visibleElements, cropX0, cropTop],
-  );
-  const displayScale = useMemo(
-    () => (currentScale ? shiftScaleResponse(currentScale, -cropX0, -cropTop) : null),
-    [currentScale, cropX0, cropTop],
-  );
+  // Elements stay in original page coordinates — the full page is rendered
+  // (not a crop), so no shift is needed.
+  const displayElements = visibleElements;
+  const displayScale = currentScale;
   const displayElementsById = useMemo(() => {
     const m = new Map<string, Element>();
     for (const el of displayElements) m.set(el.id, el);
@@ -210,12 +190,6 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
   }, [displayElements]);
 
   const ptsPerInch = currentScale?.drawing_scale_pts_per_inch ?? null;
-
-  // Auto-disable Measure when the current page has no scale (e.g. user
-  // navigated to an undetected page); avoids a stale overlay.
-  useEffect(() => {
-    if (!ptsPerInch && showMeasurements) setShowMeasurements(false);
-  }, [ptsPerInch, showMeasurements]);
 
   const measurableElements = useMemo(
     () =>
@@ -243,40 +217,6 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
   const onMeasureSelect = useCallback((id: string) => {
     setHighlightedId((prev) => (prev === id ? null : id));
   }, []);
-
-  // Fetch the debug preprocessed SVG (cropped + non-black elements stripped).
-  // Debounced so the threshold slider doesn't fire a request on every tick.
-  useEffect(() => {
-    if (!currentPage || !cropRegion) return;
-    const t = window.setTimeout(async () => {
-      try {
-        const form = new FormData();
-        form.append("file", file);
-        form.append("page_number", String(currentPage.page_number));
-        form.append(
-          "crop",
-          JSON.stringify({
-            x0: cropRegion.x0,
-            top: cropRegion.top,
-            x1: cropRegion.x1,
-            bottom: cropRegion.bottom,
-          }),
-        );
-        form.append("black_threshold", String(blackThreshold));
-        const res = await fetch(PREPROCESS_API_URL, { method: "POST", body: form });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const svg = await res.text();
-        setPreprocessedSvg(svg);
-      } catch (e) {
-        toast.error(
-          "Preprocess failed",
-          { description: e instanceof Error ? e.message : "" },
-        );
-      }
-    }, 250);
-    return () => window.clearTimeout(t);
-  }, [currentPage, cropRegion, file, blackThreshold]);
-
 
   // ----- Zoom / pan helpers -----
 
@@ -529,49 +469,6 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
     [focusElement],
   );
 
-  const detectScale = useCallback(async () => {
-    if (!currentPage) return;
-    const region = regions.find((r) => r.page === currentPage.page_number);
-    if (!region) {
-      toast.error("No crop region defined for this page.");
-      return;
-    }
-    setDetectingScale(true);
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("page_number", String(currentPage.page_number));
-      form.append(
-        "crop",
-        JSON.stringify({ x0: region.x0, top: region.top, x1: region.x1, bottom: region.bottom }),
-      );
-      form.append("black_threshold", String(blackThreshold));
-      const res = await fetch(SCALE_API_URL, { method: "POST", body: form });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-      }
-      const result = (await res.json()) as ScaleResponse;
-      setScaleByPage((prev) => ({ ...prev, [currentPage.page_number]: result }));
-      if (result.callout_count === 0) {
-        toast.warning("No diameter callouts detected in this region.");
-      } else if (result.drawing_scale_pts_per_inch == null) {
-        toast.warning(
-          `Found ${result.callout_count} callout${result.callout_count === 1 ? "" : "s"} but couldn't infer duct geometry.`,
-        );
-      } else {
-        toast.success(
-          `Detected ${result.callout_count} callout${result.callout_count === 1 ? "" : "s"} · scale ≈ ${formatScale(result.drawing_scale_pts_per_inch).ratio}`,
-        );
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Detection failed.";
-      toast.error("Scale detection failed", { description: msg });
-    } finally {
-      setDetectingScale(false);
-    }
-  }, [currentPage, regions, file, blackThreshold]);
-
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : "default";
   const zoomPct = Math.round(transform.scale * 100);
 
@@ -612,31 +509,8 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
             <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
               {zoomPct}%
             </span>
-            <ScalePill
-              scale={currentScale}
-              loading={detectingScale}
-              onRun={detectScale}
-            />
-            <Button
-              variant={showMeasurements ? "default" : "outline"}
-              size="sm"
-              onClick={() => setShowMeasurements((v) => !v)}
-              disabled={!ptsPerInch}
-              aria-label="Toggle measurements"
-              title={ptsPerInch ? "Toggle rectangle dimensions" : "Detect scale first"}
-            >
-              <Ruler />
-              Measure
-            </Button>
-            <Button
-              variant={debugOpen ? "default" : "outline"}
-              size="sm"
-              onClick={() => setDebugOpen((v) => !v)}
-              aria-label="Colour debug panel"
-              title="Colour debug (temporary)"
-            >
-              <Bug />
-            </Button>
+            <ScaleBadge scale={currentScale} />
+            <OpacityControl value={pdfOpacity} onChange={setPdfOpacity} />
           </>
         }
       />
@@ -675,57 +549,64 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
               willChange: "transform",
             }}
           >
-            {currentPage && preprocessedSvg && render ? (
-              <div
-                className="relative bg-white shadow-2xl ring-1 ring-border/30"
-                style={{ width: render.width, height: render.height }}
-              >
-                <div
-                  // The arbitrary-variant selectors force the SVG inside to
-                  // fill the container — otherwise `width="100%"` on the SVG
-                  // sometimes resolves to the intrinsic viewBox size.
-                  className="absolute inset-0 [&>svg]:block [&>svg]:h-full [&>svg]:w-full"
-                  // Trusted: the SVG comes from our own backend, generated by
-                  // PyMuPDF + a colour-filter post-pass — no user-supplied HTML.
-                  dangerouslySetInnerHTML={{ __html: preprocessedSvg }}
-                />
-                <ElementOverlay
-                  elements={displayElements}
-                  scale={baseScale}
-                  pageWidth={render.width}
-                  pageHeight={render.height}
-                  showLabels={showLabels}
-                  highlightedId={highlightedId}
-                  hoveredId={hoveredId}
-                />
-                {displayScale && (
-                  <CalloutOverlay
-                    scale={baseScale}
-                    pageWidth={render.width}
-                    pageHeight={render.height}
-                    result={displayScale}
-                  />
-                )}
-                {showMeasurements && ptsPerInch && (
-                  <MeasurementsOverlay
-                    elements={measurableElements}
-                    scale={baseScale}
-                    ptsPerInch={ptsPerInch}
-                    pageWidth={render.width}
-                    pageHeight={render.height}
-                    highlightedId={highlightedId}
-                    hoveredId={hoveredId}
-                    onHover={setHoveredId}
-                    onSelect={onMeasureSelect}
-                  />
-                )}
-              </div>
-            ) : (
-              <div
-                className="flex items-center justify-center rounded-md border border-border bg-card text-sm text-muted-foreground"
-                style={{ width: rasterWidth, height: 200 }}
-              >
-                {preprocessedSvg ? "Preparing…" : "Generating preprocessed view…"}
+            {currentPage && (
+              <div className="relative bg-white shadow-2xl ring-1 ring-border/30">
+                <PdfPage
+                  // Remount on page change so render-info resets cleanly.
+                  key={`${currentPage.page_number}-${rasterWidth}`}
+                  file={pdfUrl}
+                  pageNumber={currentPage.page_number}
+                  width={rasterWidth}
+                  pdfOpacity={pdfOpacity}
+                  onLoad={() => {}}
+                  onRender={setRenderInfo}
+                  onError={(err) =>
+                    toast.error(`PDF render failed: ${err.message}`)
+                  }
+                >
+                  {render && (
+                    <>
+                      {cropRegion && (
+                        <CropOutline
+                          cropRegion={cropRegion}
+                          scale={baseScale}
+                          pageWidth={render.width}
+                          pageHeight={render.height}
+                        />
+                      )}
+                      <ElementOverlay
+                        elements={displayElements}
+                        scale={baseScale}
+                        pageWidth={render.width}
+                        pageHeight={render.height}
+                        showLabels={showLabels}
+                        highlightedId={highlightedId}
+                        hoveredId={hoveredId}
+                      />
+                      {displayScale && (
+                        <CalloutOverlay
+                          scale={baseScale}
+                          pageWidth={render.width}
+                          pageHeight={render.height}
+                          result={displayScale}
+                        />
+                      )}
+                      {ptsPerInch && (
+                        <MeasurementsOverlay
+                          elements={measurableElements}
+                          scale={baseScale}
+                          ptsPerInch={ptsPerInch}
+                          pageWidth={render.width}
+                          pageHeight={render.height}
+                          highlightedId={highlightedId}
+                          hoveredId={hoveredId}
+                          onHover={setHoveredId}
+                          onSelect={onMeasureSelect}
+                        />
+                      )}
+                    </>
+                  )}
+                </PdfPage>
               </div>
             )}
           </div>
@@ -752,19 +633,6 @@ export default function Viewer({ data, file, regions, onReset }: Props) {
           onSelect={onSelectFromList}
         />
 
-        {debugOpen && currentPage && (
-          <ColorDebugPanel
-            elements={currentPage.elements}
-            threshold={blackThreshold}
-            setThreshold={setBlackThreshold}
-            highlightedColor={highlightedColor}
-            setHighlightedColor={setHighlightedColor}
-            onProceed={() => {
-              setHighlightedColor(null);
-              setDebugOpen(false);
-            }}
-          />
-        )}
       </main>
     </div>
   );
@@ -923,51 +791,112 @@ function ZoomToolbar({
   );
 }
 
-function ScalePill({
-  scale,
-  loading,
-  onRun,
-}: {
-  scale: ScaleResponse | null;
-  loading: boolean;
-  onRun: () => void;
-}) {
-  if (loading) {
+// Read-only badge showing the scale the pipeline detected for this page.
+function ScaleBadge({ scale }: { scale: ScaleResponse | null }) {
+  if (!scale || scale.drawing_scale_pts_per_inch == null) {
     return (
       <span className="flex items-center gap-1.5 rounded-md border border-border/60 bg-card/60 px-2 py-1 text-[11px] text-muted-foreground">
         <Ruler className="size-3" />
-        Detecting…
+        scale unknown
       </span>
-    );
-  }
-  if (!scale) {
-    return (
-      <Button variant="outline" size="sm" onClick={onRun}>
-        <Ruler />
-        Detect scale
-      </Button>
     );
   }
   const pts = scale.drawing_scale_pts_per_inch;
-  const formatted = pts != null ? formatScale(pts) : null;
+  const formatted = formatScale(pts);
   return (
-    <button
-      type="button"
-      onClick={onRun}
-      title="Re-run scale detection"
-      className="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-[11px] hover:bg-primary/15"
-    >
+    <span className="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-[11px]">
       <Ruler className="size-3 text-primary" />
       <span className="font-mono tabular-nums text-foreground/90">
-        {formatted ? formatted.ratio : "scale unknown"}
+        {formatted.ratio}
       </span>
-      {formatted && formatted.label !== `${pts!.toFixed(2)} pts/in` && (
+      {formatted.label !== `${pts.toFixed(2)} pts/in` && (
         <span className="text-muted-foreground">· {formatted.label}</span>
       )}
       <span className="text-muted-foreground">
         · {scale.callout_count} callout{scale.callout_count === 1 ? "" : "s"}
       </span>
-    </button>
+    </span>
+  );
+}
+
+// Compact slider for the underlying PDF's opacity. Affects only the rendered
+// PDF (not the overlays), so the user can fade the drawing in and out to see
+// which items the pipeline placed on top.
+function OpacityControl({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const pct = Math.round(value * 100);
+  return (
+    <label
+      className="flex items-center gap-1.5 rounded-md border border-border/60 bg-card/60 px-2 py-1"
+      title="PDF opacity"
+    >
+      <Eye className="size-3 text-muted-foreground" />
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={1}
+        value={pct}
+        onChange={(e) => onChange(Number(e.target.value) / 100)}
+        aria-label="PDF opacity"
+        className={cn(
+          "h-1 w-20 cursor-pointer appearance-none rounded-full bg-border outline-none",
+          "[&::-webkit-slider-thumb]:size-3 [&::-webkit-slider-thumb]:appearance-none",
+          "[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary",
+          "[&::-webkit-slider-thumb]:shadow-sm [&::-webkit-slider-thumb]:cursor-grab",
+          "[&::-moz-range-thumb]:size-3 [&::-moz-range-thumb]:rounded-full",
+          "[&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-primary",
+        )}
+      />
+      <span className="min-w-[2.5ch] text-right font-mono text-[10px] tabular-nums text-muted-foreground">
+        {pct}%
+      </span>
+    </label>
+  );
+}
+
+// Outline of the crop region the pipeline analyzed. Drawn over the rendered
+// page so the user can see which area was processed (everything outside is
+// untouched and won't have detected items).
+function CropOutline({
+  cropRegion,
+  scale,
+  pageWidth,
+  pageHeight,
+}: {
+  cropRegion: CropRegion;
+  scale: number;
+  pageWidth: number;
+  pageHeight: number;
+}) {
+  const x = cropRegion.x0 * scale;
+  const y = cropRegion.top * scale;
+  const w = (cropRegion.x1 - cropRegion.x0) * scale;
+  const h = (cropRegion.bottom - cropRegion.top) * scale;
+  return (
+    <svg
+      className="pointer-events-none absolute left-0 top-0"
+      width={pageWidth}
+      height={pageHeight}
+      viewBox={`0 0 ${pageWidth} ${pageHeight}`}
+    >
+      <rect
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        fill="none"
+        stroke="rgb(99, 102, 241)"
+        strokeOpacity={0.5}
+        strokeWidth={1.5}
+        strokeDasharray="6 4"
+      />
+    </svg>
   );
 }
 
